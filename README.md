@@ -1,4 +1,20 @@
-# CryptoRadar:币圈仓位结构异动监控
+# CryptoRadar
+
+## 云端版(当前在用)
+
+- **GitHub Actions** 每 15 分钟运行 `cloud_run.py`:用 OKX 公开数据扫描 CoinGecko/CoinPaprika 市值前 150 名中在 OKX 有 USDT 永续的代币,外加自选 OP。结果写入本仓库 `data` 分支:
+  - [status.md](../../blob/data/status.md):网页上直接看的中文摘要
+  - `signals.json` 当前快照 · `events.json` 最近 7 天的新事件 · `state.json` 冷却和价位状态
+- **Claude 定时任务**:每小时读取 `events.json`,有新事件就推送到手机 Claude App;每天早上 8:46(新加坡时间)推送日报
+- 调整阈值、自选、价位提醒:修改 `cloud_config.yaml` 并提交,会自动重新扫描
+- 为什么不用币安:GitHub 服务器在美国,币安会返回 451
+- 注意:公开仓库 60 天没有活动时,GitHub 会暂停定时任务。本工作流每次运行都会推送 data 分支,正常情况下不会触发这个限制;万一被暂停,Claude 每小时的检查会提醒你
+
+离线自检:`python -m tests.cloud_selftest`
+
+---
+
+## 本地版(可选)
 
 监控市值前 200 名、且有币安 USDT 永续合约的代币(另加自选,默认 OP),每 15 分钟扫描一次。
 出现 OI 背离、资金费率拥挤、脱离大盘的独立行情等异动时推送到微信;同时把全部小时级数据
