@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 
 from cryptoradar.config import load_config
 from cryptoradar.features import build_features
@@ -54,24 +55,60 @@ def load_json(path: Path, default):
         return default
 
 
-def build_universe(okx: OKX, cfg: dict) -> list[dict]:
+PAPRIKA = "https://api.coinpaprika.com/v1/tickers"
+
+
+def ranked_coins(ucfg: dict) -> tuple[list[dict], str]:
+    """市值排名列表 [{symbol, rank, current_price}]。CoinGecko 失败时换 CoinPaprika。"""
+    for attempt in range(3):
+        try:
+            coins = fetch_coingecko_top(250, ucfg.get("coingecko_api_key") or None)
+            return [{"symbol": (c.get("symbol") or "").upper(), "rank": c.get("market_cap_rank"),
+                     "current_price": c.get("current_price")} for c in coins], "coingecko"
+        except Exception as e:
+            log.warning("CoinGecko 第 %d 次失败:%s", attempt + 1, e)
+            time.sleep(10 * (attempt + 1))
+    try:
+        r = requests.get(PAPRIKA, params={"quotes": "USD"}, timeout=40)
+        r.raise_for_status()
+        rows = sorted((x for x in r.json() if x.get("rank")), key=lambda x: x["rank"])[:400]
+        return [{"symbol": (x.get("symbol") or "").upper(), "rank": x["rank"],
+                 "current_price": (x.get("quotes") or {}).get("USD", {}).get("price")} for x in rows], "coinpaprika"
+    except Exception as e:
+        log.warning("CoinPaprika 也失败:%s", e)
+    return [], "none"
+
+
+def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[list[dict], dict]:
     ucfg = cfg["universe"]
+    top_n = int(ucfg.get("top_n", 150))
     swaps = okx.usdt_swaps()
     exclude = DEFAULT_EXCLUDE | {s.upper() for s in ucfg.get("exclude", [])}
     watch = [s.upper() for s in ucfg.get("watchlist", [])]
-    try:
-        coins = fetch_coingecko_top(int(ucfg.get("top_n", 150)), ucfg.get("coingecko_api_key") or None)
-    except Exception as e:
-        log.warning("CoinGecko 获取失败:%s,只监控自选和 BTC/ETH", e)
-        coins = []
+
+    coins, source = ranked_coins(ucfg)
+    if coins:
+        cache = {"ts": now_ms(), "source": source, "coins": coins}
+    elif cached and cached.get("coins"):
+        log.warning("排名数据源都失败,沿用 %s 的缓存", cached.get("source"))
+        cache = dict(cached)
+        cache["source"] = f"cache({cached.get('source')})"
+        coins = cached["coins"]
+    else:
+        cache = {"ts": 0, "source": "none", "coins": []}
+
+    rank_of = {}
+    for c in coins:
+        rank_of.setdefault(c["symbol"], c.get("rank"))
     rows, seen = [], set()
     for c in coins:
-        sym = (c.get("symbol") or "").upper()
+        sym = c["symbol"]
+        if not c.get("rank") or c["rank"] > top_n:
+            continue
         if not sym or sym in exclude or _looks_like_stable(c) or sym in seen or sym not in swaps:
             continue
         seen.add(sym)
-        rows.append({"ccy": sym, "inst": swaps[sym], "rank": c.get("market_cap_rank"),
-                     "watch": sym in watch})
+        rows.append({"ccy": sym, "inst": swaps[sym], "rank": c["rank"], "watch": sym in watch})
     for sym in watch + ["BTC", "ETH"]:
         if sym in seen:
             continue
@@ -79,8 +116,9 @@ def build_universe(okx: OKX, cfg: dict) -> list[dict]:
             log.warning("%s 在 OKX 没有 USDT 永续,跳过", sym)
             continue
         seen.add(sym)
-        rows.append({"ccy": sym, "inst": swaps[sym], "rank": None, "watch": sym in watch})
-    return rows
+        rows.append({"ccy": sym, "inst": swaps[sym], "rank": rank_of.get(sym), "watch": sym in watch})
+    log.info("监控名单 %d 个(排名来源:%s)", len(rows), cache["source"])
+    return rows, cache
 
 
 def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[dict, list, dict]:
@@ -90,7 +128,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
     cooldown = float(sc.get("cooldown_hours", 6)) * HOUR_MS
     now = now_ms()
 
-    uni = build_universe(okx, cfg)
+    uni, uni_cache = build_universe(okx, cfg, prev_state.get("universe"))
     order = sorted(uni, key=lambda u: (u["ccy"] not in ("BTC", "ETH"),))  # 先取 BTC/ETH
     data, failed = {}, []
     for i, u in enumerate(order, 1):
@@ -180,7 +218,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
         "generated_at": now,
         "generated_at_local": local.strftime("%Y-%m-%d %H:%M %Z"),
         "runtime_sec": round(time.time() - t0, 1),
-        "scanned": len(results), "universe": len(uni), "failed": failed,
+        "scanned": len(results), "universe": len(uni), "universe_source": uni_cache["source"], "failed": failed,
         "market": market,
         "watchlist": [{"symbol": u["ccy"], "rank": u["rank"], "rules": [r.id for r in fired],
                        "text": describe(u["ccy"], row, fired, u["rank"], True, LS_LABEL),
@@ -196,7 +234,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
     state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after},
-             "price_alerts": pa_state}
+             "price_alerts": pa_state, "universe": uni_cache}
     return signals, events, state
 
 
