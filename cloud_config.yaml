@@ -1,0 +1,30 @@
+# CryptoRadar 云端版配置(GitHub Actions 使用)。改完提交到 main 分支,会自动重新扫描一次。
+
+universe:
+  top_n: 150            # CoinGecko 市值前 N 名,再与 OKX USDT 永续取交集
+  watchlist: [OP]       # 自选:推送门槛更低,每次单独列出
+  exclude: []
+
+signals:
+  cooldown_hours: 6       # 同一代币同一规则 6 小时内不重复算作新事件
+  min_score_to_push: 2.5  # 普通代币:规则权重合计 ≥ 2.5 才算事件
+  watchlist_min_score: 1.0
+  thresholds:
+    oi_z: 2.0
+    resid_z: 2.5
+    funding_z: 2.5
+    funding_abs: 0.001
+    vol_z: 2.5
+    ret1h_z: 3.5
+    ls_z: 2.5
+
+# 价位提醒:价格穿越时生成一次事件
+price_alerts:
+  - symbol: OP
+    below: 0.12
+    note: "日线看涨失效位"
+  - symbol: OP
+    below: 0.095
+    note: "关键支撑"
+
+display_timezone: Asia/Singapore

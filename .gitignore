@@ -1,0 +1,8 @@
+__pycache__/
+config.yaml
+data/
+logs/
+reports/
+out/
+prev/
+.venv/

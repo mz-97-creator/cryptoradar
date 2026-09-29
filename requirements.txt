@@ -1,0 +1,5 @@
+requests>=2.31
+pandas>=2.1
+numpy>=1.26
+PyYAML>=6.0
+tzdata>=2024.1

@@ -1,0 +1,56 @@
+# ============================================================
+# CryptoRadar 配置文件
+# 使用方法:把本文件复制一份,改名为 config.yaml,再修改里面的内容
+# ============================================================
+
+universe:
+  top_n: 200                # CoinGecko 市值前 N 名(OP 目前约在 140–160 名)
+  watchlist: [OP]           # 自选:不论排名都监控,推送门槛更低,日报里单独列出
+  exclude: []               # 额外排除的代币(稳定币、包装币已默认排除)
+  refresh_hours: 24         # 多久刷新一次市值排名
+  coingecko_api_key: ""     # 可选。免费 Demo Key 能减少被限频的概率
+
+schedule:
+  interval_minutes: 15      # 每几分钟扫描一轮(建议 ≥10;前 200 名一轮约需 2–3 分钟)
+  offset_seconds: 90        # 整点后多等几秒,让币安的整点数据发布完
+
+signals:
+  cooldown_hours: 6         # 同一代币同一规则,6 小时内不重复推送
+  min_score_to_push: 2.5    # 普通代币:触发规则的权重合计 ≥ 该值才推送
+  watchlist_min_score: 1.0  # 自选代币的推送门槛
+  max_per_message: 10       # 一条推送最多列几个代币
+  thresholds:               # 规则阈值(不写就用默认值)
+    oi_z: 2.0               # OI 24h 变化的 z-score
+    resid_z: 2.5            # 剔除 BTC 影响后 24h 收益的 z-score
+    funding_z: 2.5          # 资金费率 z-score
+    funding_abs: 0.001      # 资金费率绝对值(每 8 小时 0.1%)
+    vol_z: 2.5              # 24h 成交额 z-score
+    ret1h_z: 3.5            # 1 小时收益 z-score
+    ls_z: 2.5               # 大户持仓多空比 z-score
+
+# 价位提醒:穿越时推送一次,价格回到另一侧后重新生效
+price_alerts:
+  - symbol: OPUSDT
+    below: 0.12
+    note: "日线看涨失效位"
+  - symbol: OPUSDT
+    below: 0.095            # ← 改成你 3x 仓位实际爆仓价上方 10% 左右
+    note: "接近 3x 多单爆仓区,考虑减仓或补保证金"
+
+notify:
+  channel: pushplus         # pushplus(微信)/ serverchan(微信)/ telegram / console(只打印)
+  pushplus_token: ""        # pushplus.plus 实名认证后,在"一对一推送"复制 token
+  serverchan_sendkey: ""    # sct.ftqq.com 的 SendKey(免费版每天只有 5 条)
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  daily_limit: 150          # 每日推送上限。PushPlus 免费额度 200/天,超了当天停发、严重超限封 7 天
+  heartbeat_hour: 9         # 每天几点发一条日报(同时证明程序还活着);不需要就写 null
+
+display_timezone: Asia/Singapore
+
+storage:
+  db_path: data/cryptoradar.db
+
+research:
+  symbols: [OPUSDT, BTCUSDT, ETHUSDT]   # backfill.py 默认回填的合约
+  start: "2022-06-01"                   # OP 合约上线日
