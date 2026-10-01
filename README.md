@@ -196,6 +196,7 @@ backfill.py           历史回填(币安 API + 数据站)
 backfill_vision.py    历史回填(只用数据站,地区受限时用)
 tune.py               阈值/权重调参与评分模型的样本外检验
 model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估、当前排名与导出
+horizon_study.py      方向研究:72h/1周/2周/4周下的相对强弱排序(现有特征 + 经典跨币因子)
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/
