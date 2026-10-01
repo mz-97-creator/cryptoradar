@@ -2,7 +2,7 @@
 
 backfill.py 的 K 线和资金费率走币安 API,在币安限制的地区(HTTP 451)用不了。
 本脚本把三类数据都改成读官方数据站的压缩包,写进同一个 SQLite,后面的 research.py / tune.py 不用改:
-- 1h K 线:按月文件,当月用按日文件补齐
+- 1h K 线:按月文件;当月、以及月度文件还没发布的上个月,用按日文件补齐
 - 资金费率:按月文件(当月最后几天会缺,对应时段资金费率相关规则不触发)
 - OI / 大户多空比 / 主动买卖比:按日 metrics 文件(沿用 backfill.py 的解析和续跑记录)
 
@@ -68,18 +68,30 @@ def kline_rows(df: pd.DataFrame) -> list[list]:
 
 
 def backfill_klines_vision(store: Store, sym: str, start: date, today: date, workers: int) -> int:
-    urls = []
+    """按月文件取 K 线;当月、以及上个月的月度文件还没发布(404)时,改用按日文件补齐。"""
+    def daily_urls(y: int, m: int) -> list[str]:
+        d, out = date(y, m, 1), []
+        while d.month == m and d < today:
+            out.append(f"{BASE}/daily/klines/{sym}/1h/{sym}-1h-{d.isoformat()}.zip")
+            d += timedelta(days=1)
+        return out
+
+    urls, fallback = [], []
     for y, m in months(start, today):
         if (y, m) == (today.year, today.month):
-            d = date(y, m, 1)
-            while d < today:
-                urls.append(f"{BASE}/daily/klines/{sym}/1h/{sym}-1h-{d.isoformat()}.zip")
-                d += timedelta(days=1)
+            fallback.append((y, m))
         else:
-            urls.append(f"{BASE}/monthly/klines/{sym}/1h/{sym}-1h-{y}-{m:02d}.zip")
+            urls.append((f"{BASE}/monthly/klines/{sym}/1h/{sym}-1h-{y}-{m:02d}.zip", (y, m)))
     n = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for df in ex.map(fetch_zip_csv, urls):
+        dfs = list(ex.map(fetch_zip_csv, [u for u, _ in urls]))
+        for df, (_, ym) in zip(dfs, urls):
+            if df is None:
+                fallback.append(ym)          # 月度文件还没发布:用按日文件
+            elif not df.empty:
+                n += store.upsert_klines(sym, kline_rows(df))
+        daily = [u for ym in fallback for u in daily_urls(*ym)]
+        for df in ex.map(fetch_zip_csv, daily):
             if df is not None and not df.empty:
                 n += store.upsert_klines(sym, kline_rows(df))
     return n

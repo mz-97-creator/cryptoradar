@@ -145,6 +145,19 @@ pip install -r requirements-research.txt                      梯度提升和报
 
 只有样本外的数字才有参考价值;调参规则如果不如当前规则,说明过拟合,不要采用。
 
+## 五点五五、72 小时机会模型(model.py)
+
+```
+.venv\Scripts\python.exe model.py                  评估 + 当前排名(先 backfill.py / backfill_vision.py 回填)
+.venv\Scripts\python.exe model.py --threshold 0.05 --topk 8 --cost 0.002
+```
+
+对名单里每个币预测未来 72 小时(相对 BTC 超额):上涨概率 P(>+5%)、下跌概率 P(<-5%)、波动幅度、
+回撤 q10 及由此得到的"90% 情形不被强平"的杠杆上限。输入是币自身特征 + 大盘行情(BTC 趋势/波动、市场广度、全市场资金费率)。
+评估按时间截面做(每 72 小时取一次,互不重叠):Spearman IC、前/后 k 名的真实表现、扣成本净收益、概率校准与 Brier 技能分、
+回撤分位数覆盖率、按大盘风格拆分;并与"只看最近波动"和"现行规则得分"两个基线对照。
+结果在 `reports/model_report.md`,当前排名在 `reports/model_latest.csv`。
+
 ## 五点六、实盘信号后验表
 
 云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
@@ -167,6 +180,7 @@ monitor.py            实时监控入口
 backfill.py           历史回填(币安 API + 数据站)
 backfill_vision.py    历史回填(只用数据站,地区受限时用)
 tune.py               阈值/权重调参与评分模型的样本外检验
+model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估与当前排名
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/

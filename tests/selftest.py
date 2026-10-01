@@ -123,6 +123,21 @@ def main() -> None:
         tune.write_report(tmp / "reports", {"滚动检验": res, "70/30": split}, args, fw)
         check((tmp / "reports" / "tune_report.md").exists(), "报告已生成")
 
+        print("\n[6] 72 小时机会模型(model.py):流程跑通,预测与标签对齐,训练期早于检验期")
+        import model
+        D = model.build_table(pool, th)
+        check(D["symbol"].nunique() == 3 and {"breadth", "mkt_funding", "lrange", "rule_score"} <= set(D.columns),
+              "样本表含大盘行情特征")
+        res = model.run_eval(D, folds=2, first_train=0.5, thr=0.05, topk=1, cost=0.002)
+        P = model.pool(res)
+        check(len(res["folds"]) == 2 and "波动:模型" in P["ic"].index, "滚动检验可运行")
+        for x in res["folds"]:
+            T = x["T"]
+            check(T["p_up"].between(0, 1).all() and T["p_dn"].between(0, 1).all(), "概率在 0~1 之间")
+            check((T["pred_mae_q10"] < 0).all(), "回撤 q10 为负数")
+        latest, _ = model.rank_now(D, 0.05)
+        check(len(latest) == 3 and latest["可承受杠杆(90%)"].gt(0).all(), "当前排名每个币一行")
+
         print("\n全部通过 ✅")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
