@@ -21,6 +21,7 @@ DEFAULTS = {
         "watchlist_min_score": 1.0,
         "max_per_message": 10,
         "thresholds": {},
+        "rule_weights": {},   # 留空 = 用内置权重;tune.py 验证通过后可粘贴 reports/suggested_weights.yaml
     },
     "price_alerts": [],
     "funding_alerts": [],

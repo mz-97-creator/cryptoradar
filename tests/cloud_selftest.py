@@ -129,6 +129,19 @@ def main():
     check(op_ev.get("outlook") and "历史:" in op_ev["text"], "事件附带历史概率")
     check(any(p["kind"] == "signal" for p in preds) and any(p["kind"] == "market" for p in preds), "预警写入记分卡")
 
+    # 72 小时机会模型:云端打分结构完整,概率在 0~1,回撤为负,杠杆上限为正;出错不影响主扫描
+    ob = sig["opportunity"]
+    check(ob and not ob.get("error"), f"机会模型输出:{ob.get('error') if ob else None}")
+    cs_ = ob["coins"]
+    check(len(cs_) >= 6 and all(0 <= c["p_up"] <= 1 and 0 <= c["p_dn"] <= 1 for c in cs_), "概率在 0~1 之间")
+    check(all(c["mae_q10"] < 0 and c["safe_lev"] > 0 and c["vol_range"] > 0 for c in cs_), "回撤为负、杠杆上限与波动为正")
+    check(ob["top_vol"] and set(ob["top_vol"]) <= {c["symbol"] for c in cs_}, "波动榜在名单内")
+    check(all(c["direction"] in ("无明确方向", "中性", "偏涨", "偏跌") for c in cs_), "方向标签合法(证据弱时不下结论)")
+    check(all({"rank_vol_range", "rank_p_up", "rank_p_dn"} <= set(c) for c in cs_), "每个币带三项排名")
+    check(all(set(h) == {"symbol", "reasons"} and h["reasons"] for h in ob["watch_highlights"]), "自选关注项含原因")
+    check("机会榜" in cloud_run.status_md(sig, events), "status.md 含机会榜")
+    check(sig["opportunity_live"]["resolved"] == 0, "实盘核对:刚上线时无已结算记录")
+
     # 样本库:读写一致,且比实时窗口更早的样本会被保留
     tmpa = Path(tempfile.mkdtemp()) / "archive.csv.gz"
     fs.save_archive(archive, tmpa)
@@ -150,6 +163,46 @@ def main():
     future = fs.new_prediction(t0, "signal", "OP", "OI_DIV", int(f.index[-10]), None, "up", .6, .5, .01, 30)
     check(fs.resolve([future], {"OP": f}, pd.DataFrame(), int(f.index[-1]))[0]["res"] == {}, "未到期的不提前核对")
     print("  " + fs.scorecard_text(fs.scorecard([dict(pr, res=res, ts=t0 + 100 * HOUR_MS)], t0 + 100 * HOUR_MS)))
+
+    # 实盘记录:每 6 小时记一次(同一时刻只保留第一次),满 72h 后用真实价格结算
+    from cryptoradar import opportunity as opp
+    t6 = (int(f.index[-200]) // HOUR_MS // 6) * 6 * HOUR_MS
+    t6 = t6 if t6 in f.index else int(f.index[-200])
+    snap = pd.DataFrame({"t_bar": [t6, t6], "symbol": ["OP", "OP"], "p_up": [0.3, 0.9], "p_dn": [0.1, 0.1],
+                         "vol_range": [0.2, 0.2], "mae_q10": [-0.1, -0.1], "t": [0, 0]})
+    lg = opp.log_snapshot(None, snap.drop(columns="t").iloc[[0]].assign(t_bar=(t6 // HOUR_MS // 6) * 6 * HOUR_MS))
+    lg2 = opp.log_snapshot(lg, snap.drop(columns="t").iloc[[1]].assign(t_bar=(t6 // HOUR_MS // 6) * 6 * HOUR_MS))
+    check(len(lg2) == 1 and lg2["p_up"].iloc[0] == 0.3, "同一时刻只保留第一次预测")
+    rs = opp.resolve_log(pd.DataFrame({"t_bar": [int(f.index[-150])], "symbol": ["OP"], "p_up": [0.3], "p_dn": [0.1],
+                                      "vol_range": [0.2], "mae_q10": [-0.1]}), {"OP": f})
+    check(len(rs) == 1 and rs["mae72"].iloc[0] <= 0 and rs["range72"].iloc[0] > 0, "满 72h 的记录被结算")
+    check(opp.live_summary(rs, 0.05)["resolved"] == 1 and "积累中" in opp.live_summary(rs, 0.05)["status"], "样本不足时只报条数")
+
+    # 信号后验记录表:含全部触发规则,幂等更新,预测被清理后记录仍在
+    pr2 = fs.new_prediction(t0, "signal", "OP", "OI_DIV", t0, 0.5, "up", 0.6, 0.5, 0.01, 30,
+                            rules=["OI_DIV", "RESID"], score=3.0, watch=True)
+    pr2 = fs.resolve([pr2], {"OP": f, "BTC": f}, pd.DataFrame(), t0 + 100 * HOUR_MS)[0]
+    led = fs.update_ledger(None, [pr2])
+    check(len(led) == 1 and led.at[0, "rules"] == "OI_DIV;RESID" and pd.notna(led.at[0, "resid72"]), "记录表写入全部规则和 72h 结果")
+    led2 = fs.update_ledger(led, [pr2])
+    check(len(led2) == 1, "重复更新不产生重复行")
+    check(len(fs.update_ledger(led2, [])) == 1, "预测被清理后记录表仍保留")
+    ls = fs.ledger_summary(led2)
+    check(set(ls["by_rule"]) == {"OI_DIV", "RESID"} and ls["resolved"] == 1, "按规则汇总(多规则信号各算一次)")
+    check(any("OI 激增但价格未涨" in ln for ln in fs.ledger_text(ls)), "记录表文字可读")
+    unresolved = fs.new_prediction(t0, "signal", "OP", "VOL", int(f.index[-10]), None, "none", None, None, None, 0)
+    check(fs.ledger_summary(fs.update_ledger(None, [unresolved]))["resolved"] == 0, "未到期的信号不计入汇总")
+
+    # 规则权重可由配置覆盖:权重 ≤ 0 即停用,未知规则名报错
+    from cryptoradar.signals import RULES, RULES_BY_ID, apply_weights
+    check([r.weight for r in apply_weights(None)] == [r.weight for r in RULES], "不配置时和内置权重完全一致")
+    rw = {r.id: r.weight for r in apply_weights({"OI_DIV": 0, "RESID": 3.0})}
+    check("OI_DIV" not in rw and rw["RESID"] == 3.0 and rw["VOL"] == RULES_BY_ID["VOL"].weight, "权重覆盖与停用生效")
+    try:
+        apply_weights({"NOPE": 1})
+        check(False, "未知规则名应报错")
+    except ValueError:
+        check(True, "未知规则名报错")
     print("\n" + fs.market_text(ms))
 
     print("\n[3] 完整命令行流程 + OKX 被拒绝时")
@@ -169,6 +222,7 @@ def main():
         check(s3.get("consecutive_errors") == 1, "连续错误计数")
         check(len(e3) == len(events2), "出错时事件和状态原样保留")
         check((tmp / "out" / "status.md").exists(), "status.md 已生成")
+        check((tmp / "out" / "ledger.csv").exists(), "ledger.csv 已生成(出错时也保留)")
         check("资金费率" in cloud_run.status_md(sig2, events2), "status.md 显示资金费率和每日成本")
         check("回购收益率" in cloud_run.status_md(sig2, events2), "status.md 显示回购收益率")
     finally:

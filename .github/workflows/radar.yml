@@ -12,6 +12,7 @@ on:
       - "cloud_run.py"
       - "cloud_config.yaml"
       - "cryptoradar/**"
+      - "models/**"
       - ".github/workflows/radar.yml"
 
 permissions:
@@ -38,11 +39,14 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      - name: 安装机会模型依赖(失败不影响扫描,只是跳过机会榜)
+        run: pip install scikit-learn==1.9.1 || echo "scikit-learn 安装失败,机会模型将被跳过"
+
       - name: 取回上一次的状态
         run: |
           mkdir -p prev
           if git fetch --depth=1 origin data 2>/dev/null; then
-            for f in state.json events.json signals.json archive.csv.gz predictions.json; do
+            for f in state.json events.json signals.json archive.csv.gz predictions.json ledger.csv opp_log.csv.gz; do
               git show FETCH_HEAD:$f > prev/$f 2>/dev/null || rm -f prev/$f
             done
           fi

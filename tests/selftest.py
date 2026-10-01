@@ -97,6 +97,54 @@ def main() -> None:
         check(hit >= 0.8 * len(market.events), f"埋入的 {len(market.events)} 次事件识别出 {hit} 次,且都在事件发生之前")
         check(div.resid72_mean > base.resid72_mean + 0.03, "信号后的 72h 收益明显高于基准")
 
+        print("\n[5] 调参、学习权重与评分模型的样本外检验(tune.py):流程跑通,且训练期始终早于检验期")
+        import numpy as np
+        import tune
+        pool = tune.load_frames(store, th, ["OPUSDT", "SOLUSDT", "ARBUSDT"])
+        tune.GRID = {"oi_z": [2.0, 3.0], "resid_z": [2.5], "funding_z": [2.5], "min_score": [1.5, 2.5]}
+        res = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3, min_lev=1.0)
+        per_fold, total, chosen = res["per_fold"], res["total"], res["chosen"]
+        print(tune.fmt(total).to_string(index=False))
+        want = {"基准", "当前规则", "调参规则", "学习权重", "逻辑回归"} | ({"梯度提升"} if tune.have_sklearn() else set())
+        check(set(total["方法"]) == want, f"各方法都有结果:{sorted(want)}")
+        check(len(per_fold) == 2 * len(want) and len(chosen) == 2, "每轮每种方法各一行")
+        check(all(np.isfinite(v) for v in res["models"]["逻辑回归"].coefs().values()), "模型系数有限")
+        wb = res["weights_by_fold"][tune.RULE_IDS]
+        check((wb.to_numpy() >= 0).all() and (wb.max(axis=1) <= 2.0 + 1e-9).all(), "学出的权重非负且不超过 2.0")
+        # 约束:safe_lev 要求设得高到不可能满足时,调参规则/学习权重这一轮不触发,而不是勉强给结果
+        strict = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3, min_lev=1e6)
+        s_total = strict["total"].set_index("方法")
+        check(all(s_total.loc[m, "n"] == 0 for m in ("调参规则", "学习权重", "逻辑回归")),
+              "safe_lev 约束不可满足时不触发")
+        split = tune.run_tune(pool, th, folds=1, first_train=0.7, top_pct=5.0, min_n=3, min_lev=1.0)
+        check(len(split["per_fold"]) == len(want), "70/30 单次检验可运行")
+        args = type("A", (), {"folds": 2, "top_pct": 5.0, "min_n": 3, "min_safe_lev": 1.0})()
+        fw = tune.final_weights(pool, th, 3, 1.0)
+        tune.write_report(tmp / "reports", {"滚动检验": res, "70/30": split}, args, fw)
+        check((tmp / "reports" / "tune_report.md").exists(), "报告已生成")
+
+        print("\n[6] 72 小时机会模型(model.py):流程跑通,预测与标签对齐,训练期早于检验期")
+        import model
+        D = model.build_table(pool, th)
+        check(D["symbol"].nunique() == 3 and {"breadth", "mkt_funding", "lrange", "rule_score"} <= set(D.columns),
+              "样本表含大盘行情特征")
+        res = model.run_eval(D, folds=2, first_train=0.5, thr=0.05, topk=1, cost=0.002)
+        P = model.pool(res)
+        check(len(res["folds"]) == 2 and "波动:模型" in P["ic"].index, "滚动检验可运行")
+        for x in res["folds"]:
+            T = x["T"]
+            check(T["p_up"].between(0, 1).all() and T["p_dn"].between(0, 1).all(), "概率在 0~1 之间")
+            check((T["pred_mae_q10"] < 0).all(), "回撤 q10 为负数")
+        ev = model.direction_evidence(P)
+        check(set(ev) == {"偏涨", "偏跌", "中性"} and all("强度" in v for v in ev.values()), "方向档位含历史实绩与证据强度")
+        latest, _ = model.rank_now(D, 0.05, 1, ev)
+        check(len(latest) == 3 and latest["可承受杠杆(90%)"].gt(0).all(), "当前排名每个币一行")
+        check({"偏涨", "偏跌"} <= set(latest["方向档位(研究)"]) and latest["证据强度"].astype(str).str.len().gt(0).all(),
+              "每个币有研究用方向档位和证据强度")
+        check(set(latest["方向"]) <= {"无明确方向", "中性", "偏涨", "偏跌"}
+              and all(d == "无明确方向" for d, t in zip(latest["方向"], latest["方向档位(研究)"])
+                      if t != "中性" and str(ev[t]["强度"]).startswith("弱")), "证据弱的档位不下结论")
+
         print("\n全部通过 ✅")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

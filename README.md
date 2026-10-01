@@ -119,6 +119,70 @@ OI、多空比、主动买卖比来自币安官方数据站 data.binance.vision 
 
 第一行"基准"是任意时点开仓的表现,每个条件都应该和它比。
 
+## 五点五、调参、权重学习与评分模型的样本外检验
+
+```
+pip install -r requirements-research.txt                      梯度提升和报告表格需要(云端扫描不需要)
+.venv\Scripts\python.exe backfill_vision.py --bases-file syms.txt --start 2024-01-01   币安 API 被限制地区用这个回填
+.venv\Scripts\python.exe tune.py                 用库里所有已回填的币
+.venv\Scripts\python.exe tune.py --min-safe-lev 3 --pcts 2,5,10 --min-n 30
+```
+
+`backfill_vision.py` 的 K 线、资金费率、OI 全部读 data.binance.vision,不访问 fapi.binance.com(部分地区会返回 451);
+当月最后几天的资金费率数据站还没有,那段时间资金费率相关规则不触发。
+
+`tune.py` 比较六种触发方式(都只看做多:触发后 72 小时的 BTC 残差收益):基准、当前规则、
+**调参规则**(网格搜索阈值)、**学习权重**(规则权重由数据学出,系数为负的规则权重记 0 = 砍掉)、
+**逻辑回归**、**梯度提升**。
+
+- **选参统一规则**:训练段内部前 70% 拟合、后 30% 验证,在验证段按"事件数 ≥ min_n、平均残差收益 > 0、
+  `safe_lev` ≥ `--min-safe-lev`(默认 3 倍)的前提下 t 值最高"选参数;都不满足就不触发,不勉强给结果。
+- **两种检验**:滚动检验(前 40% 起步,后面 4 段逐段检验)和固定的前 70% 训练 / 后 30% 检验。训练与检验之间隔 72 小时防止泄漏。
+- 报告 `reports/tune_report.md` 含:汇总、自动判断(事件数够、t ≥ 2.5、高于基准和当前规则、safe_lev 达标才算"值得采用")、
+  每轮学出的权重、逻辑回归系数、梯度提升特征重要性。
+- 结论是"值得采用"时,把 `reports/suggested_weights.yaml` 的内容并入 `cloud_config.yaml` 的 `signals:` 下
+  (`rule_weights` 覆盖权重,权重 ≤ 0 即停用该规则;不配置则用内置权重)。
+
+只有样本外的数字才有参考价值;调参规则如果不如当前规则,说明过拟合,不要采用。
+
+## 五点五五、72 小时机会模型(model.py)
+
+```
+.venv\Scripts\python.exe model.py                  评估 + 当前排名(先 backfill.py / backfill_vision.py 回填)
+.venv\Scripts\python.exe model.py --threshold 0.05 --topk 8 --cost 0.002
+```
+
+对名单里每个币预测未来 72 小时(相对 BTC 超额):上涨概率 P(>+5%)、下跌概率 P(<-5%)、波动幅度、
+回撤 q10 及由此得到的"90% 情形不被强平"的杠杆上限。输入是币自身特征 + 大盘行情(BTC 趋势/波动、市场广度、全市场资金费率)。
+评估按时间截面做(每 72 小时取一次,互不重叠):Spearman IC、前/后 k 名的真实表现、扣成本净收益、概率校准与 Brier 技能分、
+回撤分位数覆盖率、按大盘风格拆分;并与"只看最近波动"和"现行规则得分"两个基线对照。
+结果在 `reports/model_report.md`,当前排名在 `reports/model_latest.csv`。
+
+### 云端的机会榜
+
+云端每次扫描会用 `models/opportunity_price.joblib` 给每个币打分,写进 `signals.json` 的 `opportunity`(`status.md` 里也有一节):
+预测 72h 波动幅度、回撤 q10 与杠杆上限、上涨/下跌概率、各项排名,以及自选币里排名靠前的"值得留意"项(`watch_highlights`)。
+上涨/下跌概率的做法:先预测这个币未来 72h 剔除 BTC 后的波动尺度 σ,再用"收益/σ"的样本外历史分布推出概率,
+所以波动越大两头概率越高、榜单顺序与波动榜相同——这不是缺陷,而是现有特征里确实没有方向信息的直接体现;
+方向标签(direction)在样本外 t 值不足时一律输出"无明确方向",研究中的档位保留在 `direction_tier_research`。
+云端数据来自 OKX,而模型用币安历史训练,所以云端用**价格模型**(只用价格与成交额派生的特征;实测两个交易所的这类特征相关性 0.95~1.00,
+而持仓量、资金费率、多空比、主动买卖比差别很大,所以不用)。模型包出错或没装 scikit-learn 时只会跳过这一块,不影响主扫描。
+重新训练并导出(需先回填到最新):
+
+```
+.venv\Scripts\python.exe model.py --feature-set price --export models/opportunity_price.joblib
+```
+导出的模型必须和云端的 scikit-learn 版本一致(`radar.yml` 里固定为 1.9.1)。
+每 6 小时会把全部币的预测记入 `data` 分支的 `opp_log.csv.gz`,满 72 小时后用真实价格核对,
+结果写进 `signals.json` 的 `opportunity_live`(预测概率 vs 实际频率、回撤越界率、波动排序相关性),用来检验模型在实盘是否仍然成立。
+
+## 五点六、实盘信号后验表
+
+云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
+24h/72h 真实收益(原始和相对 BTC)、持有期最大回撤。`status.md` 里有"实盘信号后验表(按规则)",
+列出每条规则的到期数、72h 超额中位、上涨比例、t 值和 safe_lev,样本少于 30 会标注。
+实盘样本攒够后,可以和 `research.py` / `tune.py` 的回测结果对照,看规则在实盘有没有失效。
+
 ## 六、离线自检
 
 ```
@@ -131,11 +195,17 @@ OI、多空比、主动买卖比来自币安官方数据站 data.binance.vision 
 
 ```
 monitor.py            实时监控入口
-backfill.py           历史回填
+backfill.py           历史回填(币安 API + 数据站)
+backfill_vision.py    历史回填(只用数据站,地区受限时用)
+tune.py               阈值/权重调参与评分模型的样本外检验
+model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估、当前排名与导出
+horizon_study.py      方向研究:1周/2周/4周下的相对强弱排序(现有特征 + 经典跨币因子 + DefiLlama),Newey-West 校正的 t 值
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/
   binance_api.py      币安公开接口(含限速)
+  opportunity.py      72h 机会模型的特征、模型、校准与云端打分(训练评估和云端共用)
+  defillama.py        DefiLlama 免费接口:公链/协议 TVL 与费用(解锁/排放数据是付费接口,不用)
   universe.py         市值前 N ∩ 币安永续 的名单映射
   collector.py        增量采集
   features.py         特征计算(监控与研究共用,避免回测和实盘两套代码)

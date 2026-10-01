@@ -1,0 +1,2 @@
+scikit-learn==1.9.1   # 72h 机会模型 models/*.joblib 由这个版本训练,必须一致;tune.py 的梯度提升也用它
+tabulate>=0.9       # 报告里的 markdown 表格

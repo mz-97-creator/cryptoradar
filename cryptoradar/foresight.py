@@ -356,10 +356,12 @@ def load_predictions(path: Path) -> list[dict]:
 
 def new_prediction(now: int, kind: str, symbol: str, cid: str, t_bar: int, price: float | None,
                    call: str, pred_up72: float | None, base_up72: float | None, pred_med72: float | None,
-                   n: int, scope: str = "") -> dict:
+                   n: int, scope: str = "", rules: list[str] | None = None, score: float | None = None,
+                   watch: bool = False) -> dict:
     return {"id": f"{now}-{kind}-{symbol}-{cid}", "ts": now, "t_bar": int(t_bar), "kind": kind,
             "symbol": symbol, "cond": cid, "price": price, "scope": scope, "call": call,
-            "pred_up72": pred_up72, "base_up72": base_up72, "pred_med72": pred_med72, "n": int(n), "res": {}}
+            "pred_up72": pred_up72, "base_up72": base_up72, "pred_med72": pred_med72, "n": int(n),
+            "rules": rules or [cid], "score": score, "watch": bool(watch), "res": {}}
 
 
 def market_call(st: dict | None, base: dict | None) -> str:
@@ -455,3 +457,85 @@ def scorecard_text(sc: dict) -> str:
         parts.append(f"市场灯切换 {mk['n']} 次,之后山寨 72h 中位 {_p(mk['ret72_med'], 1)}")
     parts.append(f"待核对 {sc['pending']} 条")
     return ";".join(parts)
+
+
+# ------------------------------------------------------------------ 信号后验记录表(永久累积)
+# predictions.json 只保留 PRED_KEEP_DAYS 天、且只记主条件;这张表每条推送的信号一行,
+# 含触发的全部规则、得分、24h/72h 的真实收益(原始/相对 BTC)和持有期最大回撤,永不删除,
+# 实盘样本越攒越多,按规则汇总后可以和回测(research.py / tune.py)对照。
+LEDGER_COLS = ["id", "ts", "symbol", "watch", "rules", "score", "price", "call", "pred_up72", "base_up72",
+               "ret24", "resid24", "mae24", "ret72", "resid72", "mae72"]
+
+
+def load_ledger(path: Path) -> pd.DataFrame | None:
+    try:
+        df = pd.read_csv(path)
+        return df if "id" in df else None
+    except Exception:
+        return None
+
+
+def update_ledger(ledger: pd.DataFrame | None, preds: list[dict]) -> pd.DataFrame:
+    """把 signal 类预测并入记录表(按 id 更新:新信号加一行,到期的补上 24h/72h 结果)。"""
+    rows = {r["id"]: r for r in ledger.to_dict("records")} if ledger is not None and len(ledger) else {}
+    for p in preds:
+        if p.get("kind") != "signal":
+            continue
+        r = rows.get(p["id"], {})
+        r.update({"id": p["id"], "ts": p["ts"], "symbol": p["symbol"], "watch": int(bool(p.get("watch"))),
+                  "rules": ";".join(p.get("rules") or [p["cond"]]), "score": p.get("score"),
+                  "price": p.get("price"), "call": p.get("call"),
+                  "pred_up72": p.get("pred_up72"), "base_up72": p.get("base_up72")})
+        for h in (24, 72):
+            res = p["res"].get(f"{h}h")
+            if res:
+                r[f"ret{h}"] = res["ret"]
+                r[f"resid{h}"] = None if res.get("btc") is None else res["ret"] - res["btc"]
+                r[f"mae{h}"] = res.get("mae")
+        rows[p["id"]] = r
+    df = pd.DataFrame(list(rows.values()), columns=LEDGER_COLS)
+    return df.sort_values("ts").reset_index(drop=True)
+
+
+def _row_stats(sub: pd.DataFrame) -> dict | None:
+    x = sub["resid72"].dropna()
+    if x.empty:
+        return None
+    mae = sub["mae72"].dropna()
+    p10 = float(mae.quantile(0.10)) if len(mae) else None
+    sd = x.std()
+    return {"n": int(len(x)), "resid72_mean": float(x.mean()), "resid72_median": float(x.median()),
+            "hit72": float((x > 0).mean()),
+            "t72": float(x.mean() / (sd / np.sqrt(len(x)))) if len(x) > 1 and sd > 0 else None,
+            "mae72_p10": p10, "safe_lev": float(1 / abs(p10)) if p10 and p10 < 0 else None}
+
+
+def ledger_summary(ledger: pd.DataFrame | None) -> dict:
+    """按规则汇总已到期(72h)的实盘信号;一条信号触发多条规则时,每条规则各算一次。"""
+    if ledger is None or ledger.empty:
+        return {"total": 0, "resolved": 0, "by_rule": {}, "all": None}
+    done = ledger[ledger["resid72"].notna()]
+    out = {"total": int(len(ledger)), "resolved": int(len(done)), "all": _row_stats(done) if len(done) else None,
+           "by_rule": {}}
+    if len(done):
+        exp = done.assign(rule=done["rules"].astype(str).str.split(";")).explode("rule")
+        for rid, sub in exp.groupby("rule"):
+            st = _row_stats(sub)
+            if st:
+                out["by_rule"][rid] = st
+    return out
+
+
+def ledger_text(ls: dict, min_n: int = 30) -> list[str]:
+    if not ls or not ls.get("total"):
+        return ["实盘还没有到期的信号,72 小时后开始累积"]
+    lines = [f"累计推送 {ls['total']} 条信号,已到期 {ls['resolved']} 条(每条 72h 后结算;样本 < {min_n} 的结论不可靠)"]
+    if ls.get("by_rule"):
+        lines += ["| 规则 | 到期数 | 72h 超额中位 | 上涨比例 | t | safe_lev |", "|---|---|---|---|---|---|"]
+        for rid, st in sorted(ls["by_rule"].items(), key=lambda kv: -kv[1]["n"]):
+            name = RULES_BY_ID[rid].name if rid in RULES_BY_ID else rid
+            t = "—" if st["t72"] is None else f"{st['t72']:+.1f}"
+            lev = "—" if st["safe_lev"] is None else f"{st['safe_lev']:.1f}x"
+            flag = "" if st["n"] >= min_n else "(样本少)"
+            lines.append(f"| {name}{flag} | {st['n']} | {_p(st['resid72_median'], 1)} | {_pp(st['hit72'])} | {t} | {lev} |")
+    return lines

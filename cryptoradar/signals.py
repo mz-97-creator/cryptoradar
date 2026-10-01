@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import numpy as np
@@ -91,11 +91,21 @@ def evaluate_frame(f: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
                         index=f.index)
 
 
-def evaluate_last(f: pd.DataFrame, thresholds: dict) -> list[Rule]:
+def apply_weights(overrides: dict | None) -> list[Rule]:
+    """按配置 signals.rule_weights 覆盖规则权重;权重 ≤ 0 的规则视为停用。
+    没配置就是内置权重,行为和以前完全一样。权重建议来自 tune.py(reports/suggested_weights.yaml)。"""
+    ov = overrides or {}
+    unknown = set(ov) - set(RULES_BY_ID)
+    if unknown:
+        raise ValueError(f"rule_weights 里有未知规则:{sorted(unknown)};可用:{sorted(RULES_BY_ID)}")
+    return [replace(r, weight=float(ov[r.id])) if r.id in ov else r for r in RULES if float(ov.get(r.id, r.weight)) > 0]
+
+
+def evaluate_last(f: pd.DataFrame, thresholds: dict, rules: list[Rule] | None = None) -> list[Rule]:
     if f.empty:
         return []
     last = f.iloc[[-1]]
-    return [r for r in RULES if bool(r.fn(last, thresholds).fillna(False).iloc[0])]
+    return [r for r in (RULES if rules is None else rules) if bool(r.fn(last, thresholds).fillna(False).iloc[0])]
 
 
 # ------------------------------------------------------------------ 格式化

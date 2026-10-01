@@ -13,7 +13,7 @@ from .binance_api import HOUR_MS, BinanceBlockedError, BinanceFutures
 from .collector import collect_symbol, update_live
 from .features import build_features
 from .notify import Notifier
-from .signals import describe, evaluate_last, merged_thresholds
+from .signals import apply_weights, describe, evaluate_last, merged_thresholds
 from .storage import Store, now_ms
 from .universe import refresh_universe
 
@@ -34,6 +34,7 @@ class Monitor:
         self.api = api or BinanceFutures()
         self.notifier = Notifier(cfg, self.store, self.tz)
         self.th = merged_thresholds(cfg["signals"].get("thresholds"))
+        self.rules = apply_weights(cfg["signals"].get("rule_weights"))
         self.fail_streak = 0
 
     # ------------------------------------------------------------ helpers
@@ -103,7 +104,7 @@ class Monitor:
             if f.empty:
                 continue
             row = f.iloc[-1]
-            fired = evaluate_last(f, self.th)
+            fired = evaluate_last(f, self.th, self.rules)
             out.append((u, row, fired))
         return out
 
