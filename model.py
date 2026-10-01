@@ -30,139 +30,13 @@ import numpy as np
 import pandas as pd
 
 from cryptoradar.config import load_config
+from cryptoradar.opportunity import (EMBARGO, FEATURE_SETS, H, HOUR, LABEL_COLS, VOL_FEATS, Models, build_table,
+                                     latest_rows, load_bundle, save_bundle, score_rows)
 from cryptoradar.signals import merged_thresholds
 from cryptoradar.storage import Store
 import tune
 
 log = logging.getLogger("model")
-
-HOUR = 3_600_000
-H = 72
-EMBARGO = H * HOUR
-COIN_FEATS = ["ret_24h", "ret_72h", "ret_7d", "resid_24h_z", "ret_1h_z", "oi_chg_24h", "oi_z", "funding",
-              "funding_z", "vol_z", "top_ls_z", "taker_z", "range_24h", "adr_14d", "range_z", "rv_24h",
-              "rv_7d", "beta", "ethbtc_ret_24h"]
-VOL_FEATS = ["range_24h", "adr_14d", "range_z", "rv_24h", "rv_7d"]
-REGIME_FEATS = ["btc_ret_24h", "btc_ret_7d", "btc_ret_30d", "btc_rv_7d", "breadth", "mkt_funding",
-                "mkt_oi_z", "mkt_ret_24h", "dispersion"]
-FEATS = COIN_FEATS + REGIME_FEATS
-LABEL_COLS = ["fwd_resid_72h", "fwd_ret_72h", "mae_72h", "mfe_72h"]
-
-
-# ------------------------------------------------------------------ 数据
-def build_table(frames: list[pd.DataFrame], th: dict) -> pd.DataFrame:
-    """把各币的特征表拼成一张长表(每行 = 一个币的一个小时),并加上大盘行情特征。只用当时已知的信息。"""
-    from cryptoradar.signals import RULES
-    parts = []
-    w = np.array([r.weight for r in RULES])
-    hits = tune.hit_matrix(frames, th)
-    for f, hm in zip(frames, hits):
-        lc = np.log(f["close"])
-        g = pd.DataFrame(index=f.index)
-        g["symbol"] = f["symbol"].iloc[0]
-        for c in ["ret_24h", "resid_24h_z", "ret_1h_z", "oi_chg_24h", "oi_z", "funding", "funding_z", "vol_z",
-                  "top_ls_z", "taker_z", "range_24h", "adr_14d", "range_z", "beta", "btc_ret_24h"]:
-            g[c] = f[c] if c in f else np.nan
-        g["ethbtc_ret_24h"] = f["ethbtc_ret_24h"] if "ethbtc_ret_24h" in f else np.nan
-        g["ret_72h"] = lc.diff(72)
-        g["ret_7d"] = lc.diff(168)
-        r1 = lc.diff()
-        g["rv_24h"] = r1.rolling(24, min_periods=20).std()
-        g["rv_7d"] = r1.rolling(168, min_periods=120).std()
-        b = f["_btc_lc"]
-        g["btc_ret_7d"] = b.diff(168)
-        g["btc_ret_30d"] = b.diff(720)
-        g["btc_rv_7d"] = b.diff().rolling(168, min_periods=120).std()
-        g["above_sma7d"] = (f["close"] > f["close"].rolling(168, min_periods=120).mean()).astype(float)
-        g["rule_score"] = hm @ w
-        for c in LABEL_COLS:
-            g[c] = f[c]
-        g["close"] = f["close"]
-        parts.append(g)
-    D = pd.concat(parts)
-    D.index.name = "ts"
-    D = D.reset_index()
-    cs = D.groupby("ts")
-    D["breadth"] = D["ts"].map(cs["above_sma7d"].mean())
-    D["mkt_funding"] = D["ts"].map(cs["funding"].median())
-    D["mkt_oi_z"] = D["ts"].map(cs["oi_z"].median())
-    D["mkt_ret_24h"] = D["ts"].map(cs["ret_24h"].median())
-    D["dispersion"] = D["ts"].map(cs["ret_24h"].std())
-    D["lrange"] = np.log((D["mfe_72h"] - D["mae_72h"]).clip(lower=1e-4))
-    D["h"] = (D["ts"] // HOUR).astype("int64")
-    num = FEATS + ["rule_score", "fwd_resid_72h", "fwd_ret_72h", "mae_72h", "mfe_72h", "lrange", "above_sma7d"]
-    D[num] = D[num].astype("float32")
-    return D
-
-
-# ------------------------------------------------------------------ 模型
-def _hgb_kwargs():
-    return dict(max_depth=4, learning_rate=0.05, max_iter=200, l2_regularization=5.0,
-                min_samples_leaf=500, random_state=0)
-
-
-def _oof_proba(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np.ndarray:
-    """时间块交叉拟合:把训练期按时间切成 nb 块,每块用其余块(两侧各留 72h)训练、预测本块,
-    得到整个训练期的"样本外"概率,用来衡量模型平均偏自信多少。"""
-    from sklearn.ensemble import HistGradientBoostingClassifier as C
-    q = np.quantile(ts, np.linspace(0, 1, nb + 1))
-    q[-1] += 1
-    out = np.full(len(X), np.nan)
-    for i in range(nb):
-        blk = ((ts >= q[i]) & (ts < q[i + 1])).to_numpy()
-        keep = ~((ts > q[i] - EMBARGO) & (ts < q[i + 1] + EMBARGO)).to_numpy()
-        out[blk] = C(**_hgb_kwargs()).fit(X[keep], y[keep]).predict_proba(X[blk])[:, 1]
-    return out
-
-
-def _platt(p_raw: np.ndarray, y: np.ndarray):
-    """对 logit(p) 做一维逻辑回归:修正模型整体偏自信/偏高偏低。"""
-    from sklearn.linear_model import LogisticRegression
-    z = lambda p: np.log(np.clip(p, 1e-4, 1 - 1e-4) / (1 - np.clip(p, 1e-4, 1 - 1e-4))).reshape(-1, 1)
-    lr = LogisticRegression(C=1e3).fit(z(p_raw), y)
-    return lambda p: lr.predict_proba(z(p))[:, 1]
-
-
-class Models:
-    """四个预测目标 + 一个"只看波动"的基线。上涨/下跌概率默认做交叉拟合校准(calib="cv")。
-
-    校准的局限(样本外实测):上涨概率校准后误差从约 2.9pp 降到约 1.3pp;下跌概率没有任何方法能稳定改善,
-    因为"全市场当期有多少币大跌"随行情漂移、很难预测——所以绝对概率有约 ±4pp 的不确定性,
-    币与币之间的相对高低比绝对数值可靠。"""
-
-    def __init__(self, thr: float, calib: str = "cv"):
-        self.thr, self.calib = thr, calib
-
-    def fit(self, tr: pd.DataFrame) -> "Models":
-        from sklearn.ensemble import HistGradientBoostingClassifier as C, HistGradientBoostingRegressor as R
-        X = tr[FEATS]
-        up, dn = (tr["fwd_resid_72h"] > self.thr), (tr["fwd_resid_72h"] < -self.thr)
-        self.base_up, self.base_dn = float(up.mean()), float(dn.mean())
-        self.up = C(**_hgb_kwargs()).fit(X, up)
-        self.dn = C(**_hgb_kwargs()).fit(X, dn)
-        if self.calib == "cv":
-            self.cal_up = _platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))
-            self.cal_dn = _platt(_oof_proba(X, dn.to_numpy(float), tr["ts"]), dn.to_numpy(float))
-        else:
-            self.cal_up = self.cal_dn = lambda p: p
-        self.rng = R(**_hgb_kwargs()).fit(X, tr["lrange"])
-        self.mae = R(loss="quantile", quantile=0.10, **_hgb_kwargs()).fit(X, tr["mae_72h"])
-        Xv = tr[VOL_FEATS]
-        self.up_v = C(**_hgb_kwargs()).fit(Xv, up)
-        self.dn_v = C(**_hgb_kwargs()).fit(Xv, dn)
-        return self
-
-    def predict(self, d: pd.DataFrame) -> pd.DataFrame:
-        X, Xv = d[FEATS], d[VOL_FEATS]
-        out = pd.DataFrame(index=d.index)
-        raw_up, raw_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
-        out["p_up_raw"], out["p_dn_raw"] = raw_up, raw_dn
-        out["p_up"], out["p_dn"] = self.cal_up(raw_up), self.cal_dn(raw_dn)
-        out["pred_lrange"] = self.rng.predict(X)
-        out["pred_mae_q10"] = np.minimum(self.mae.predict(X), -1e-3)
-        out["pv_up"] = self.up_v.predict_proba(Xv)[:, 1]
-        out["pv_dn"] = self.dn_v.predict_proba(Xv)[:, 1]
-        return out
 
 
 # ------------------------------------------------------------------ 评估
@@ -294,7 +168,7 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
 
 
 def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: int, cost: float,
-             calib: str = "cv") -> dict:
+             calib: str = "cv", feature_set: str = "full") -> dict:
     lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
     L = D[lab]
     ts_all = D["ts"].to_numpy()
@@ -307,7 +181,7 @@ def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: 
         tr = L[(L["ts"] < lo - EMBARGO) & (L["h"] % 6 == 0)]
         te = L[(L["ts"] >= lo) & (L["ts"] < hi)]
         log.info("第 %d/%d 轮:训练 %d 行,检验 %d 行", k + 1, folds, len(tr), len(te))
-        m = Models(thr, calib).fit(tr)
+        m = Models(thr, calib, feature_set).fit(tr)
         r = evaluate_fold(m, te, topk, cost, thr)
         r["fold"] = k + 1
         r["window"] = (pd.to_datetime(lo, unit="ms").date(), pd.to_datetime(hi, unit="ms").date())
@@ -344,29 +218,11 @@ def pool(res: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 当前排名
-def rank_now(D: pd.DataFrame, thr: float, topk: int = 8, evidence: dict | None = None):
+def rank_now(D: pd.DataFrame, thr: float, topk: int = 8, evidence: dict | None = None, feature_set: str = "full"):
     """用全部有标签的历史训练,对每个币最新一行打分,给出方向档位(按截面排名)与该档位的历史实绩。"""
     lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
-    tr = D[lab & (D["h"] % 6 == 0)]
-    m = Models(thr).fit(tr)
-    tmax = D["ts"].max()
-    last = D[D["ts"] >= tmax - 6 * HOUR].sort_values("ts").groupby("symbol").tail(1)
-    P = m.predict(last)
-    R = last[["symbol", "ts", "close"]].join(P)
-    R["预测波动幅度"] = np.exp(R["pred_lrange"])
-    R["可承受杠杆(90%)"] = 1 / R["pred_mae_q10"].abs()
-    R["方向分(P上-P下)"] = R["p_up"] - R["p_dn"]
-    rk = R["方向分(P上-P下)"].rank(method="first", ascending=False)
-    R["方向"] = np.where(rk <= topk, "偏涨", np.where(rk > len(R) - topk, "偏跌", "中性"))
-    ev = evidence or {}
-    R["该档位历史:涨>阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("涨"))
-    R["该档位历史:跌<-阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("跌"))
-    R["该档位历史:72h超额均值"] = R["方向"].map(lambda d: ev.get(d, {}).get("超额"))
-    R["证据强度"] = R["方向"].map(lambda d: ev.get(d, {}).get("强度", ""))
-    R["P上(>+{:.0%})".format(thr)] = R["p_up"]
-    R["P下(<-{:.0%})".format(thr)] = R["p_dn"]
-    R["数据时间"] = pd.to_datetime(R["ts"], unit="ms")
-    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "ts", "p_up", "p_dn", "p_up_raw", "p_dn_raw"]).reset_index(drop=True), m
+    m = Models(thr, "cv", feature_set).fit(D[lab & (D["h"] % 6 == 0)])
+    return score_rows(m, latest_rows(D), topk, evidence), m
 
 
 def direction_evidence(P: dict) -> dict:
@@ -421,16 +277,17 @@ def section(tag: str, res: dict, P: dict, args) -> list[str]:
 
 def write_report(out: Path, wf: dict, sp: dict, Pw: dict, Ps: dict, latest: pd.DataFrame, args) -> Path:
     out.mkdir(exist_ok=True)
+    sfx = "" if args.feature_set == "full" else "_" + args.feature_set
     md = ["# 72 小时机会模型:样本外评估\n",
           f"目标:未来 72h 相对 BTC 超额收益 > +{args.threshold:.0%}(上涨)/ < -{args.threshold:.0%}(下跌),以及波动幅度与回撤 q10。"
           "全部为样本外,训练与检验之间隔 72 小时;截面每 72h 取一次,互不重叠。\n"]
     md += section("滚动检验(前 40% 起步,后面 4 段)", wf, Pw, args)
     md += section("固定 70/30(前 70% 训练,后 30% 检验)", sp, Ps, args)
-    p = out / "model_report.md"
+    p = out / f"model_report{sfx}.md"
     p.write_text("\n".join(md), encoding="utf-8")
-    Pw["ic"].to_csv(out / "model_ic_wf.csv", encoding="utf-8-sig")
-    Ps["ic"].to_csv(out / "model_ic_split.csv", encoding="utf-8-sig")
-    latest.to_csv(out / "model_latest.csv", index=False, encoding="utf-8-sig")
+    Pw["ic"].to_csv(out / f"model_ic_wf{sfx}.csv", encoding="utf-8-sig")
+    Ps["ic"].to_csv(out / f"model_ic_split{sfx}.csv", encoding="utf-8-sig")
+    latest.to_csv(out / f"model_latest{sfx}.csv", index=False, encoding="utf-8-sig")
     return p
 
 
@@ -442,6 +299,9 @@ def main() -> None:
     ap.add_argument("--cost", type=float, default=0.002, help="每期往返手续费+滑点")
     ap.add_argument("--folds", type=int, default=4)
     ap.add_argument("--symbols")
+    ap.add_argument("--feature-set", choices=list(FEATURE_SETS), default="full",
+                    help="full=全部特征(研究);price=只用价格/成交额派生特征(云端用,OKX 与币安一致)")
+    ap.add_argument("--export", help="训练好的模型包保存路径(云端 cloud_run.py 读取),如 models/opportunity_price.joblib")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     cfg = load_config(args.config)
@@ -452,10 +312,25 @@ def main() -> None:
     D = build_table(frames, th)
     log.info("样本表 %d 行 × %d 币", len(D), D["symbol"].nunique())
 
-    wf = run_eval(D, args.folds, 0.4, args.threshold, args.topk, args.cost)
-    sp = run_eval(D, 1, 0.7, args.threshold, args.topk, args.cost)
+    fs = args.feature_set
+    wf = run_eval(D, args.folds, 0.4, args.threshold, args.topk, args.cost, feature_set=fs)
+    sp = run_eval(D, 1, 0.7, args.threshold, args.topk, args.cost, feature_set=fs)
     Pw, Ps = pool(wf), pool(sp)
-    latest, _ = rank_now(D, args.threshold, args.topk, direction_evidence(Pw))
+    ev = direction_evidence(Pw)
+    latest, models = rank_now(D, args.threshold, args.topk, ev, fs)
+    if args.export:
+        lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
+        ic = Pw["ic"]
+        meta = {"feature_set": fs, "threshold": args.threshold, "topk": args.topk,
+                "trained_through": str(pd.to_datetime(D.loc[lab, "ts"].max(), unit="ms")),
+                "n_symbols": int(D["symbol"].nunique()), "n_rows": int(lab.sum()),
+                "oos_vol_ic": float(ic.loc["波动:模型", "IC均值"]), "oos_vol_ic_baseline": float(ic.loc["波动:基线(最近波动)", "IC均值"]),
+                "oos_dir_ic": float(ic.loc["方向:模型(P上-P下)", "IC均值"]), "oos_dir_ic_t": float(ic.loc["方向:模型(P上-P下)", "t"]),
+                "calib_ece": {k: float(Pw["brier"][k]["校准误差ECE"]) for k in ("上涨", "下跌")},
+                "mae_breach_rate": Pw["mae_cov_all"], "direction_evidence": ev}
+        Path(args.export).parent.mkdir(parents=True, exist_ok=True)
+        save_bundle(args.export, models, meta)
+        log.info("模型包已保存:%s", args.export)
     path = write_report(Path(cfg["_base_dir"]) / "reports", wf, sp, Pw, Ps, latest, args)
     pd.set_option("display.width", 250)
     print("\n== 滚动检验:IC ==\n", Pw["ic"].to_string())

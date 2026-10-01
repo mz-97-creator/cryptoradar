@@ -158,6 +158,21 @@ pip install -r requirements-research.txt                      梯度提升和报
 回撤分位数覆盖率、按大盘风格拆分;并与"只看最近波动"和"现行规则得分"两个基线对照。
 结果在 `reports/model_report.md`,当前排名在 `reports/model_latest.csv`。
 
+### 云端的机会榜
+
+云端每次扫描会用 `models/opportunity_price.joblib` 给每个币打分,写进 `signals.json` 的 `opportunity`(`status.md` 里也有一节):
+预测 72h 波动幅度、回撤 q10 与杠杆上限、上涨/下跌概率、方向档位及其证据强度。
+云端数据来自 OKX,而模型用币安历史训练,所以云端用**价格模型**(只用价格与成交额派生的特征;实测两个交易所的这类特征相关性 0.95~1.00,
+而持仓量、资金费率、多空比、主动买卖比差别很大,所以不用)。模型包出错或没装 scikit-learn 时只会跳过这一块,不影响主扫描。
+重新训练并导出(需先回填到最新):
+
+```
+.venv\Scripts\python.exe model.py --feature-set price --export models/opportunity_price.joblib
+```
+导出的模型必须和云端的 scikit-learn 版本一致(`radar.yml` 里固定为 1.9.1)。
+每 6 小时会把全部币的预测记入 `data` 分支的 `opp_log.csv.gz`,满 72 小时后用真实价格核对,
+结果写进 `signals.json` 的 `opportunity_live`(预测概率 vs 实际频率、回撤越界率、波动排序相关性),用来检验模型在实盘是否仍然成立。
+
 ## 五点六、实盘信号后验表
 
 云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
@@ -180,11 +195,12 @@ monitor.py            实时监控入口
 backfill.py           历史回填(币安 API + 数据站)
 backfill_vision.py    历史回填(只用数据站,地区受限时用)
 tune.py               阈值/权重调参与评分模型的样本外检验
-model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估与当前排名
+model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估、当前排名与导出
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/
   binance_api.py      币安公开接口(含限速)
+  opportunity.py      72h 机会模型的特征、模型、校准与云端打分(训练评估和云端共用)
   universe.py         市值前 N ∩ 币安永续 的名单映射
   collector.py        增量采集
   features.py         特征计算(监控与研究共用,避免回测和实盘两套代码)

@@ -30,6 +30,7 @@ import pandas as pd
 import requests
 
 from cryptoradar import foresight as fs
+from cryptoradar import opportunity as opp
 from cryptoradar.config import load_config
 from cryptoradar.features import build_features
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
@@ -42,6 +43,25 @@ log = logging.getLogger("cloud")
 FEATURE_KEYS = ["close", "ret_24h", "resid_24h_z", "ret_1h_z", "oi_chg_24h", "oi_z", "funding",
                 "funding_z", "vol_z", "top_ls", "top_ls_z", "taker_z", "adr_14d", "beta"]
 LS_LABEL = "多空账户比"
+MODEL_PATH = Path(__file__).with_name("models") / "opportunity_price.joblib"
+_BUNDLE: dict = {}
+
+
+def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: dict):
+    """72 小时机会模型:波动/回撤/概率。任何一步出错都不能影响主扫描,调用方会兜底。"""
+    oc = cfg.get("opportunity") or {}
+    if oc.get("enabled", True) is False:
+        return None, prev_log, None
+    path = Path(oc.get("model") or MODEL_PATH)
+    if not path.is_absolute():
+        path = Path(__file__).with_name(str(path))
+    if str(path) not in _BUNDLE:
+        _BUNDLE[str(path)] = opp.load_bundle(path)
+    bundle = _BUNDLE[str(path)]
+    block, R = opp.cloud_opportunity(bundle, frames, uni, int(oc.get("topk", 8)))
+    log_df = opp.log_snapshot(prev_log, R)
+    live = opp.live_summary(opp.resolve_log(log_df, combined), bundle["models"].thr)
+    return block, log_df, live
 
 
 def now_ms() -> int:
@@ -131,7 +151,8 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
 
 
 def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
-        prev_archive: pd.DataFrame | None = None, prev_preds: list | None = None):
+        prev_archive: pd.DataFrame | None = None, prev_preds: list | None = None,
+        prev_opp_log: pd.DataFrame | None = None, extras: dict | None = None):
     t0 = time.time()
     th = merged_thresholds(cfg["signals"].get("thresholds"))
     sc = cfg["signals"]
@@ -308,6 +329,14 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                                        (mst or {}).get("n", 0)))
     preds = fs.resolve(preds, combined, mframe, now)
     sc = fs.scorecard(preds, now)
+    opp_block, opp_log, opp_live = None, prev_opp_log, None
+    try:
+        opp_block, opp_log, opp_live = compute_opportunity(cfg, frames, uni, prev_opp_log, combined)
+    except Exception as e:      # 模型出错不能拖垮主扫描
+        log.warning("机会模型失败:%s", traceback.format_exc())
+        opp_block = {"error": f"{type(e).__name__}: {e}"}
+    if extras is not None:
+        extras["opp_log"] = opp_log
     archive = fs.archive_table(combined, now)
 
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
@@ -346,6 +375,8 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                        "market": mrates},
         "scorecard": sc,
         "scorecard_text": fs.scorecard_text(sc),
+        "opportunity": opp_block,
+        "opportunity_live": opp_live,
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
@@ -353,6 +384,24 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
              "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
              "market_state": mstate.get("state") if mstate else prev_ms}
     return signals, events, state, archive, preds
+
+
+def opportunity_md(o: dict, live: dict | None) -> list[str]:
+    by = {c["symbol"]: c for c in o["coins"]}
+    row = lambda c: (f"| {c['symbol']} | {c['vol_range'] * 100:.0f}% | {c['mae_q10'] * 100:+.0f}% | {c['safe_lev']:.1f}x | "
+                     f"{c['p_up'] * 100:.0f}% | {c['p_dn'] * 100:.0f}% | {c['direction']}({c['direction_evidence']}) |")
+    head = ["| 币 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 方向(证据) |", "|---|---|---|---|---|---|---|"]
+    lines = []
+    for title, key in [("波动最大", "top_vol"), ("上涨概率最高", "top_p_up"), ("下跌概率最高", "top_p_dn"), ("自选", "watchlist")]:
+        syms = o.get(key) or []
+        if syms:
+            lines += [f"**{title}**"] + head + [row(by[s]) for s in syms if s in by] + [""]
+    lines += ["> " + n for n in o.get("notes", [])]
+    if live:
+        lines.append(f"> 实盘核对:{live.get('status', '')}" if live.get("status") != "ok" else
+                     f"> 实盘核对({live['resolved']} 条):上涨概率预测均值 {live['p_up']['预测均值']:.1%} / 实际 {live['p_up']['实际频率']:.1%};"
+                     f"下跌 {live['p_dn']['预测均值']:.1%} / {live['p_dn']['实际频率']:.1%};回撤越界率 {live['mae_breach_rate']:.1%}")
+    return lines
 
 
 def status_md(sig: dict, events: list) -> str:
@@ -367,6 +416,8 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 市场状态", fs.market_text(sig["market_state"])]
     if sig.get("scorecard_text"):
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
+    if sig.get("opportunity") and not sig["opportunity"].get("error"):
+        lines += ["", "## 72 小时机会榜(波动 / 回撤 / 概率)"] + opportunity_md(sig["opportunity"], sig.get("opportunity_live"))
     if sig.get("ledger_summary"):
         lines += ["", "## 实盘信号后验表(按规则)"] + fs.ledger_text(sig["ledger_summary"])
     br = sig.get("base_rates") or {}
@@ -433,11 +484,16 @@ def main() -> None:
     prev_archive = fs.load_archive(prev / "archive.csv.gz")
     prev_preds = fs.load_predictions(prev / "predictions.json")
     prev_ledger = fs.load_ledger(prev / "ledger.csv")
+    try:
+        prev_opp_log = pd.read_csv(prev / "opp_log.csv.gz")
+    except Exception:
+        prev_opp_log = None
+    extras: dict = {}
 
     code = 0
     try:
         signals, events, state, archive, preds = run(cfg, OKX(), prev_state, prev_events, tz,
-                                                     prev_archive, prev_preds)
+                                                     prev_archive, prev_preds, prev_opp_log, extras)
     except Exception as e:
         log.error("运行失败:%s", traceback.format_exc())
         code = 1
@@ -462,6 +518,9 @@ def main() -> None:
     (out / "predictions.json").write_text(json.dumps({"predictions": preds}, ensure_ascii=False),
                                           encoding="utf-8")
     ledger.to_csv(out / "ledger.csv", index=False)
+    opp_log = extras.get("opp_log", prev_opp_log)
+    if opp_log is not None and len(opp_log):
+        opp_log.to_csv(out / "opp_log.csv.gz", index=False)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 
