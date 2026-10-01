@@ -71,7 +71,7 @@ def main() -> None:
 
     Do = table([ofr[c] for c in ofr])
     tmin = int(Do["ts"].min()) + 24 * 30 * HOUR      # 前 30 天做特征预热(滚动 z 分数需要)
-    Db = table([bfr[c].assign(symbol=c) for c in common + ["BTC"]])
+    Db = table([bfr[c].assign(symbol=c) for c in common])
     Db = Db[Db["ts"] >= tmin]
     Do = Do[Do["ts"] >= tmin]
 

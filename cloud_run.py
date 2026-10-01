@@ -58,7 +58,13 @@ def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: 
     if str(path) not in _BUNDLE:
         _BUNDLE[str(path)] = opp.load_bundle(path)
     bundle = _BUNDLE[str(path)]
-    block, R = opp.cloud_opportunity(bundle, frames, uni, int(oc.get("topk", 8)))
+    # 训练用的全是收盘完整的 K 线;OKX 返回的最后一根可能还没收盘(几十分钟的成交额、波动都偏小),去掉它再打分
+    now = now_ms()
+    done = {k: (v.iloc[:-1] if len(v) and int(v.index[-1]) + HOUR_MS > now else v) for k, v in frames.items()}
+    block, R = opp.cloud_opportunity(bundle, done, uni, int(oc.get("topk", 8)), now_ms=now,
+                                     min_age_days=float(oc.get("min_age_days", 30)),
+                                     young_age_days=float(oc.get("young_age_days", 60)),
+                                     young_dd_mult=float(oc.get("young_dd_mult", 1.3)))
     log_df = opp.log_snapshot(prev_log, R)
     live = opp.live_summary(opp.resolve_log(log_df, combined), bundle["models"].thr)
     return block, log_df, live
@@ -136,7 +142,7 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
             continue
         seen.add(sym)
         rows.append({"ccy": sym, "inst": swaps[sym], "rank": c["rank"], "watch": sym in watch,
-                     "mcap": c.get("market_cap")})
+                     "mcap": c.get("market_cap"), "list_ms": getattr(okx, "list_ms", {}).get(sym)})
     for sym in watch + ["BTC", "ETH"]:
         if sym in seen:
             continue
@@ -145,7 +151,7 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
             continue
         seen.add(sym)
         rows.append({"ccy": sym, "inst": swaps[sym], "rank": rank_of.get(sym), "watch": sym in watch,
-                     "mcap": mcap_of.get(sym)})
+                     "mcap": mcap_of.get(sym), "list_ms": getattr(okx, "list_ms", {}).get(sym)})
     log.info("监控名单 %d 个(排名来源:%s)", len(rows), cache["source"])
     return rows, cache
 
@@ -388,9 +394,10 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
 
 def opportunity_md(o: dict, live: dict | None) -> list[str]:
     by = {c["symbol"]: c for c in o["coins"]}
-    row = lambda c: (f"| {c['symbol']} | {c['vol_range'] * 100:.0f}% | {c['mae_q10'] * 100:+.0f}% | {c['safe_lev']:.1f}x | "
+    age = lambda c: "" if c.get("age_days") is None else (f"{c['age_days']}天" + ("⚠️" if c.get("status") == "上市较短" else ""))
+    row = lambda c: (f"| {c['symbol']} | {age(c)} | {c['vol_range'] * 100:.0f}% | {c['mae_q10'] * 100:+.0f}% | {c['safe_lev']:.1f}x | "
                      f"{c['p_up'] * 100:.0f}% | {c['p_dn'] * 100:.0f}% | 波动#{c['rank_vol_range']} |")
-    head = ["| 币 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 排名 |", "|---|---|---|---|---|---|---|"]
+    head = ["| 币 | 上市 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 排名 |", "|---|---|---|---|---|---|---|---|"]
     lines = []
     if o.get("watch_highlights"):
         lines += ["**自选里值得留意的**:" + ";".join(f"{h['symbol']}({'、'.join(h['reasons'])})" for h in o["watch_highlights"]), ""]
@@ -398,6 +405,8 @@ def opportunity_md(o: dict, live: dict | None) -> list[str]:
         syms = o.get(key) or []
         if syms:
             lines += [f"**{title}**"] + head + [row(by[s]) for s in syms if s in by] + [""]
+    if o.get("abstained"):
+        lines += ["**暂不判断的新币**:" + ";".join(f"{c['symbol']}({c['note']})" for c in o["abstained"]), ""]
     lines += ["> " + n for n in o.get("notes", [])]
     if live:
         lines.append(f"> 实盘核对:{live.get('status', '')}" if live.get("status") != "ok" else

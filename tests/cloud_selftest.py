@@ -38,8 +38,11 @@ class FakeOKX(OKX):
             raise OKXBlockedError("OKX 拒绝访问 HTTP 451")
         p, m = params or {}, self.m
         if path.endswith("/instruments"):
-            return [{"instId": f"{c}-USDT-SWAP", "settleCcy": "USDT", "ctType": "linear",
-                     "state": "live", "ctValCcy": c} for c in CCY]
+            import time as _t
+            # SOL 设成 5 天前上市(新币),ARB 设成 45 天前(上市较短),其余 400 天前
+            lt = {"SOL": 5, "ARB": 45}
+            return [{"instId": f"{c}-USDT-SWAP", "settleCcy": "USDT", "ctType": "linear", "state": "live", "ctValCcy": c,
+                     "listTime": str(int((_t.time() - lt.get(c, 400) * 86400) * 1000))} for c in CCY]
         ccy = p.get("ccy") or (p.get("instId", "").split("-")[0])
         d = m.data[CCY[ccy]]
         snaps = [t for t in d.index if t >= m.end - 30 * 24 * HOUR_MS]
@@ -137,6 +140,12 @@ def main():
     check(all(c["mae_q10"] < 0 and c["safe_lev"] > 0 and c["vol_range"] > 0 for c in cs_), "回撤为负、杠杆上限与波动为正")
     check(ob["top_vol"] and set(ob["top_vol"]) <= {c["symbol"] for c in cs_}, "波动榜在名单内")
     check(all(c["direction"] in ("无明确方向", "中性", "偏涨", "偏跌") for c in cs_), "方向标签合法(证据弱时不下结论)")
+    ab = {c["symbol"]: c for c in ob["abstained"]}
+    check("SOL" in ab and ab["SOL"]["p_up"] is None and ab["SOL"]["direction"] == "暂不判断", "新币(上市5天)暂不判断且不给数字")
+    check("SOL" not in {c["symbol"] for c in cs_} and "SOL" not in ob["top_vol"], "新币不进榜单和排名")
+    arb = next((c for c in cs_ if c["symbol"] == "ARB"), None)
+    check(arb is not None and arb["status"] == "上市较短" and arb["p_up"] is not None, "上市较短的币给结果但带标记")
+    check(ob["n_coins"] + ob["n_abstained"] == len(set(c["symbol"] for c in cs_) | set(ab)), "可评估与暂不判断合计等于全部")
     check(all({"rank_vol_range", "rank_p_up", "rank_p_dn"} <= set(c) for c in cs_), "每个币带三项排名")
     check(all(set(h) == {"symbol", "reasons"} and h["reasons"] for h in ob["watch_highlights"]), "自选关注项含原因")
     check("机会榜" in cloud_run.status_md(sig, events), "status.md 含机会榜")

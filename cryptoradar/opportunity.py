@@ -272,27 +272,64 @@ def load_bundle(path) -> dict:
 
 
 # ------------------------------------------------------------------ 云端:打分、实盘记录、事后结算
+DAY_MS = 86_400_000
+MIN_HISTORY_H = 700          # 滚动 30 天的 z 分数需要约 720 根;不足时特征不可靠
+
+
+def assess_coin(list_ms: int | None, history_h: int, now_ms: int, min_age_days: float, young_age_days: float) -> dict:
+    """币的"可评估性":新上市、历史不足的币,模型训练时见得少、特征(30 天滚动 z 分数)也不稳,暂不判断。
+    status: 新币(暂不判断) / 上市较短(给结果但提示) / 正常 / 未知(拿不到上市时间,按历史长度判断)。"""
+    age = None if not list_ms else (now_ms - list_ms) / DAY_MS
+    if history_h < MIN_HISTORY_H:
+        return {"age_days": age, "status": "新币", "usable": False,
+                "reason": f"可用历史只有 {history_h} 小时,不足 {MIN_HISTORY_H} 小时,特征不稳"}
+    if age is not None and age < min_age_days:
+        return {"age_days": age, "status": "新币", "usable": False,
+                "reason": f"合约上市仅 {age:.0f} 天(不足 {min_age_days:.0f} 天),模型对新币见得少,暂不判断"}
+    if age is not None and age < young_age_days:
+        return {"age_days": age, "status": "上市较短", "usable": True,
+                "reason": f"合约上市 {age:.0f} 天(不足 {young_age_days:.0f} 天),结果仅供参考,回撤与杠杆上限已更保守"}
+    return {"age_days": age, "status": "正常" if age is not None else "未知", "usable": True, "reason": ""}
+
+
 def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[dict], topk: int = 8,
-                      notable_rank: int = 15):
-    """frames: {币: build_features 的输出}。返回 (写进 signals.json 的字典, 打分表)。"""
+                      notable_rank: int = 15, now_ms: int | None = None, min_age_days: float = 30,
+                      young_age_days: float = 60, young_dd_mult: float = 1.3):
+    """frames: {币: build_features 的输出}。返回 (写进 signals.json 的字典, 可评估币的打分表)。
+    新币 / 历史不足的币不给数字(置为 None),不进榜单和排名,单独列在 abstained 里。
+    上市较短(min_age_days~young_age_days)的币回撤估计历史上偏乐观(样本外越界约 17% 而不是 10%),
+    回撤放大 young_dd_mult 倍、杠杆上限相应缩小。"""
+    import time
+    now_ms = now_ms or int(time.time() * 1000)
     models, meta = bundle["models"], bundle["meta"]
     fl = [f.assign(symbol=sym) for sym, f in frames.items() if len(f) >= 200]
     D = build_table(fl, None, with_labels=False)
     R = score_rows(models, latest_rows(D), topk, meta.get("direction_evidence"))
     info = {u["ccy"]: u for u in uni}
+    hist = {sym: len(f) for sym, f in frames.items()}
     num = lambda v: None if v is None or pd.isna(v) else float(v)
-    coins = []
+    coins, abstained, keep = [], [], []
     for r in R.to_dict("records"):
         u = info.get(r["symbol"], {})
-        coins.append({"symbol": r["symbol"], "rank": u.get("rank"), "watch": bool(u.get("watch")),
-                      "price": num(r["close"]), "vol_range": num(r["vol_range"]),
-                      "mae_q10": num(r["mae_q10"]), "safe_lev": num(r["可承受杠杆(90%)"]),
-                      "p_up": num(r["p_up"]), "p_dn": num(r["p_dn"]),
-                      "direction": r["方向"], "direction_tier_research": r["方向档位(研究)"],
-                      "direction_evidence": r["证据强度"] or "—",
-                      "t_bar": int(r["t_bar"])})
+        a = assess_coin(u.get("list_ms"), hist.get(r["symbol"], 0), now_ms, min_age_days, young_age_days)
+        row = {"symbol": r["symbol"], "rank": u.get("rank"), "watch": bool(u.get("watch")),
+               "price": num(r["close"]), "age_days": None if a["age_days"] is None else round(a["age_days"]),
+               "status": a["status"], "note": a["reason"], "t_bar": int(r["t_bar"])}
+        if not a["usable"]:
+            row.update({"vol_range": None, "mae_q10": None, "safe_lev": None, "p_up": None, "p_dn": None,
+                        "direction": "暂不判断", "direction_tier_research": None, "direction_evidence": "—"})
+            abstained.append(row)
+            continue
+        mult = young_dd_mult if a["status"] == "上市较短" else 1.0
+        row.update({"vol_range": num(r["vol_range"]), "mae_q10": num(r["mae_q10"] * mult),
+                    "safe_lev": num(r["可承受杠杆(90%)"] / mult), "p_up": num(r["p_up"]), "p_dn": num(r["p_dn"]),
+                    "direction": r["方向"], "direction_tier_research": r["方向档位(研究)"],
+                    "direction_evidence": r["证据强度"] or "—"})
+        coins.append(row)
+        keep.append(r["symbol"])
+    R = R[R["symbol"].isin(keep)].reset_index(drop=True)
     top = lambda key: [c["symbol"] for c in sorted(coins, key=lambda c: -(c[key] or 0))[:topk]]
-    # 每个币在全部币里的排名(1 = 最高),自选币有任何一项进前 notable_rank 名就单独标出来
+    # 每个币在可评估币里的排名(1 = 最高),自选币有任何一项进前 notable_rank 名就单独标出来
     names = {"vol_range": "波动", "p_up": "上涨概率", "p_dn": "下跌概率"}
     for key in names:
         for i, c in enumerate(sorted(coins, key=lambda c: -(c[key] or 0)), 1):
@@ -309,20 +346,24 @@ def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[d
                   "horizon_h": H, "threshold": models.thr,
                   "oos_vol_ic": meta.get("oos_vol_ic"), "oos_vol_ic_baseline": meta.get("oos_vol_ic_baseline"),
                   "oos_dir_ic": meta.get("oos_dir_ic"), "oos_dir_ic_t": meta.get("oos_dir_ic_t"),
-                  "calib_ece": meta.get("calib_ece"), "mae_breach_rate": meta.get("mae_breach_rate")},
+                  "calib_ece": meta.get("calib_ece"), "mae_breach_rate": meta.get("mae_breach_rate"),
+                  "min_age_days": min_age_days, "young_age_days": young_age_days, "young_dd_mult": young_dd_mult},
         "notes": [
             f"vol_range = 预测未来 {H}h 最高价与最低价之间的幅度(占价格比例);样本外它对币种波动大小的排序相关性约 "
             f"{meta.get('oos_vol_ic', 0):.2f}(只看最近波动为 {meta.get('oos_vol_ic_baseline', 0):.2f})",
             f"p_up / p_dn = 相对 BTC 的 {H}h 超额收益大于 +{models.thr:.0%} / 小于 -{models.thr:.0%} 的概率。"
-            "绝对数值有约 ±4~6 个百分点的误差,币与币之间的相对高低更可靠;高波动的币两头概率都会偏高",
+            "由预测的波动大小推出,所以波动越大两头概率都越高,榜单顺序与波动榜相同;绝对数值有约 ±4~6 个百分点的误差",
             "mae_q10 = 持有期最大回撤的 10% 分位(90% 的情形回撤不会比它更深),safe_lev = 1/|mae_q10|,"
             "未计手续费和维持保证金,实际应更保守",
             "direction:目前没有统计上站得住的方向判断(样本外 t 值不足),一律为「无明确方向」;研究中的档位见 direction_tier_research",
+            f"status=新币 的币(合约上市不足 {min_age_days:.0f} 天,或可用历史不足)暂不判断,所有数字为空,单独列在 abstained;"
+            f"status=上市较短(不足 {young_age_days:.0f} 天)给结果但仅供参考,回撤放大 {young_dd_mult:g} 倍、杠杆上限相应缩小(历史上这类币回撤估计偏乐观)",
         ],
         "coins": coins,
+        "abstained": abstained,
         "top_vol": top("vol_range"),
         "watchlist": [c["symbol"] for c in coins if c["watch"]],
-        "watch_highlights": highlights, "n_coins": len(coins),
+        "watch_highlights": highlights, "n_coins": len(coins), "n_abstained": len(abstained),
     }
     return block, R
 

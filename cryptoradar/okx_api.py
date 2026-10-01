@@ -86,9 +86,12 @@ class OKX:
     def usdt_swaps(self) -> dict[str, str]:
         """{币种: instId},仅 USDT 本位线性永续。"""
         out = {}
+        self.list_ms: dict[str, int] = {}          # {币种: 合约上市时间(毫秒)},用来识别新币
         for i in self._get("/api/v5/public/instruments", {"instType": "SWAP"}):
             if i.get("settleCcy") == "USDT" and i.get("ctType") == "linear" and i.get("state") == "live":
                 out[i["ctValCcy"].upper()] = i["instId"]
+                if str(i.get("listTime") or "").isdigit():
+                    self.list_ms[i["ctValCcy"].upper()] = int(i["listTime"])
         return out
 
     def tickers(self) -> dict[str, dict]:
