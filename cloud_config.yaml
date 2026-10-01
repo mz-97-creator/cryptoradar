@@ -2,7 +2,7 @@
 
 universe:
   top_n: 150            # CoinGecko 市值前 N 名,再与 OKX USDT 永续取交集
-  watchlist: [OP]       # 自选:推送门槛更低,每次单独列出
+  watchlist: [OP, HYPE, ETH, AAVE, ARB, PUMP]   # 自选:推送门槛更低,每次单独列出;ARB 作为 OP 的同类对照
   exclude: []
 
 signals:
@@ -45,3 +45,19 @@ funding_alerts:
     note: "空头拥挤,多头持仓反而收钱"
 
 display_timezone: Asia/Singapore
+
+# 回购收益率 = 年化回购额 ÷ 当前流通市值(市值每轮从 CoinGecko 自动取,回购额手填,有新数据就更新)
+# annual_usd 直接填美元;annual_eth 按当轮 ETH 价格折算。PUMP 还有约 44% 供应未释放,按 FDV 算收益率会低很多。
+buybacks:
+  - symbol: HYPE
+    annual_usd: 555000000
+    basis: "2026 年 1–8 月约 3.7 亿美元,年化"
+  - symbol: PUMP
+    annual_usd: 300000000
+    basis: "2026 年 1–8 月约 2 亿美元,年化;近期周收入约 1600 万美元"
+  - symbol: AAVE
+    annual_usd: 50000000
+    basis: "Aavenomics:每年 5000 万美元,2025-11 起常态化"
+  - symbol: OP
+    annual_eth: 2934
+    basis: "Superchain 收入的 50%(前 12 个月 5868 ETH),2026-02 起每月回购"

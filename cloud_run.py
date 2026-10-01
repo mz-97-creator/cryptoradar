@@ -59,12 +59,13 @@ PAPRIKA = "https://api.coinpaprika.com/v1/tickers"
 
 
 def ranked_coins(ucfg: dict) -> tuple[list[dict], str]:
-    """市值排名列表 [{symbol, rank, current_price}]。CoinGecko 失败时换 CoinPaprika。"""
+    """市值排名列表 [{symbol, rank, current_price, market_cap}]。CoinGecko 失败时换 CoinPaprika。"""
     for attempt in range(3):
         try:
             coins = fetch_coingecko_top(250, ucfg.get("coingecko_api_key") or None)
             return [{"symbol": (c.get("symbol") or "").upper(), "rank": c.get("market_cap_rank"),
-                     "current_price": c.get("current_price")} for c in coins], "coingecko"
+                     "current_price": c.get("current_price"), "market_cap": c.get("market_cap")}
+                    for c in coins], "coingecko"
         except Exception as e:
             log.warning("CoinGecko 第 %d 次失败:%s", attempt + 1, e)
             time.sleep(10 * (attempt + 1))
@@ -73,7 +74,8 @@ def ranked_coins(ucfg: dict) -> tuple[list[dict], str]:
         r.raise_for_status()
         rows = sorted((x for x in r.json() if x.get("rank")), key=lambda x: x["rank"])[:400]
         return [{"symbol": (x.get("symbol") or "").upper(), "rank": x["rank"],
-                 "current_price": (x.get("quotes") or {}).get("USD", {}).get("price")} for x in rows], "coinpaprika"
+                 "current_price": (x.get("quotes") or {}).get("USD", {}).get("price"),
+                 "market_cap": (x.get("quotes") or {}).get("USD", {}).get("market_cap")} for x in rows], "coinpaprika"
     except Exception as e:
         log.warning("CoinPaprika 也失败:%s", e)
     return [], "none"
@@ -97,9 +99,10 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
     else:
         cache = {"ts": 0, "source": "none", "coins": []}
 
-    rank_of = {}
+    rank_of, mcap_of = {}, {}
     for c in coins:
         rank_of.setdefault(c["symbol"], c.get("rank"))
+        mcap_of.setdefault(c["symbol"], c.get("market_cap"))
     rows, seen = [], set()
     for c in coins:
         sym = c["symbol"]
@@ -108,7 +111,8 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
         if not sym or sym in exclude or _looks_like_stable(c) or sym in seen or sym not in swaps:
             continue
         seen.add(sym)
-        rows.append({"ccy": sym, "inst": swaps[sym], "rank": c["rank"], "watch": sym in watch})
+        rows.append({"ccy": sym, "inst": swaps[sym], "rank": c["rank"], "watch": sym in watch,
+                     "mcap": c.get("market_cap")})
     for sym in watch + ["BTC", "ETH"]:
         if sym in seen:
             continue
@@ -116,7 +120,8 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
             log.warning("%s 在 OKX 没有 USDT 永续,跳过", sym)
             continue
         seen.add(sym)
-        rows.append({"ccy": sym, "inst": swaps[sym], "rank": rank_of.get(sym), "watch": sym in watch})
+        rows.append({"ccy": sym, "inst": swaps[sym], "rank": rank_of.get(sym), "watch": sym in watch,
+                     "mcap": mcap_of.get(sym)})
     log.info("监控名单 %d 个(排名来源:%s)", len(rows), cache["source"])
     return rows, cache
 
@@ -239,6 +244,21 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                 last_fire[cool_key] = now
             fa_state[key] = bool(hit)
 
+    # 回购收益率 = 年化回购额 ÷ 当前流通市值(回购额是手填的估算,见 cloud_config.yaml)
+    mcaps = {u["ccy"]: u.get("mcap") for u in uni}
+    eth_px = prices.get("ETH")
+    buybacks = []
+    for b in cfg.get("buybacks") or []:
+        sym = str(b.get("symbol", "")).upper().replace("USDT", "").replace("-SWAP", "").strip("-")
+        annual = b.get("annual_usd")
+        if annual is None and b.get("annual_eth") is not None and eth_px:
+            annual = float(b["annual_eth"]) * eth_px
+        mc = _num(mcaps.get(sym))
+        buybacks.append({"symbol": sym, "annual_usd": _num(annual), "market_cap": mc,
+                         "yield": _num(annual / mc) if annual and mc else None,
+                         "price": prices.get(sym), "basis": b.get("basis", "")})
+    buybacks.sort(key=lambda x: -(x["yield"] if x["yield"] is not None else -1))
+
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
     market = {}
     if btc_row is not None:
@@ -264,6 +284,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                         "funding": _num(row.get("funding"))} for u, row in movers],
         "price_levels": levels,
         "funding_levels": fund_levels,
+        "buybacks": buybacks,
         "new_events": len(new_events),
     }
     keep_after = now - 7 * 24 * HOUR_MS
@@ -293,6 +314,14 @@ def status_md(sig: dict, events: list) -> str:
             s += f" · {fl['position_usdt']:,.0f} USDT 多仓每天{'付' if d >= 0 else '收'} {abs(d):.2f} USDT"
         lines.append(s)
     if seen:
+        lines.append("")
+    if sig.get("buybacks"):
+        lines += ["## 回购收益率(年化回购 ÷ 流通市值)"]
+        for b in sig["buybacks"]:
+            y = f"{b['yield'] * 100:.1f}%" if b.get("yield") is not None else "—"
+            amt = f"${b['annual_usd'] / 1e6:,.0f}M/年" if b.get("annual_usd") else "—"
+            mc = f"${b['market_cap'] / 1e6:,.0f}M" if b.get("market_cap") else "—"
+            lines.append(f"- {b['symbol']} {y} · 回购 {amt} · 市值 {mc} · {b.get('basis', '')}")
         lines.append("")
     lines += ["## 正在触发"] + [f["text"] + "\n" for f in sig.get("firing", [])[:20]]
     lines += ["## 最近 24 小时新事件"]

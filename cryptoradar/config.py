@@ -24,6 +24,7 @@ DEFAULTS = {
     },
     "price_alerts": [],
     "funding_alerts": [],
+    "buybacks": [],
     "notify": {
         "channel": "console",
         "pushplus_token": "",
