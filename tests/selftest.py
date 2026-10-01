@@ -139,7 +139,11 @@ def main() -> None:
         check(set(ev) == {"偏涨", "偏跌", "中性"} and all("强度" in v for v in ev.values()), "方向档位含历史实绩与证据强度")
         latest, _ = model.rank_now(D, 0.05, 1, ev)
         check(len(latest) == 3 and latest["可承受杠杆(90%)"].gt(0).all(), "当前排名每个币一行")
-        check({"偏涨", "偏跌"} <= set(latest["方向"]) and latest["证据强度"].astype(str).str.len().gt(0).all(), "每个币有方向档位和证据强度")
+        check({"偏涨", "偏跌"} <= set(latest["方向档位(研究)"]) and latest["证据强度"].astype(str).str.len().gt(0).all(),
+              "每个币有研究用方向档位和证据强度")
+        check(set(latest["方向"]) <= {"无明确方向", "中性", "偏涨", "偏跌"}
+              and all(d == "无明确方向" for d, t in zip(latest["方向"], latest["方向档位(研究)"])
+                      if t != "中性" and str(ev[t]["强度"]).startswith("弱")), "证据弱的档位不下结论")
 
         print("\n全部通过 ✅")
     finally:
