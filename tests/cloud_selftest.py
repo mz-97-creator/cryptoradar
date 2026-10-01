@@ -150,6 +150,32 @@ def main():
     future = fs.new_prediction(t0, "signal", "OP", "OI_DIV", int(f.index[-10]), None, "up", .6, .5, .01, 30)
     check(fs.resolve([future], {"OP": f}, pd.DataFrame(), int(f.index[-1]))[0]["res"] == {}, "未到期的不提前核对")
     print("  " + fs.scorecard_text(fs.scorecard([dict(pr, res=res, ts=t0 + 100 * HOUR_MS)], t0 + 100 * HOUR_MS)))
+
+    # 信号后验记录表:含全部触发规则,幂等更新,预测被清理后记录仍在
+    pr2 = fs.new_prediction(t0, "signal", "OP", "OI_DIV", t0, 0.5, "up", 0.6, 0.5, 0.01, 30,
+                            rules=["OI_DIV", "RESID"], score=3.0, watch=True)
+    pr2 = fs.resolve([pr2], {"OP": f, "BTC": f}, pd.DataFrame(), t0 + 100 * HOUR_MS)[0]
+    led = fs.update_ledger(None, [pr2])
+    check(len(led) == 1 and led.at[0, "rules"] == "OI_DIV;RESID" and pd.notna(led.at[0, "resid72"]), "记录表写入全部规则和 72h 结果")
+    led2 = fs.update_ledger(led, [pr2])
+    check(len(led2) == 1, "重复更新不产生重复行")
+    check(len(fs.update_ledger(led2, [])) == 1, "预测被清理后记录表仍保留")
+    ls = fs.ledger_summary(led2)
+    check(set(ls["by_rule"]) == {"OI_DIV", "RESID"} and ls["resolved"] == 1, "按规则汇总(多规则信号各算一次)")
+    check(any("OI 激增但价格未涨" in ln for ln in fs.ledger_text(ls)), "记录表文字可读")
+    unresolved = fs.new_prediction(t0, "signal", "OP", "VOL", int(f.index[-10]), None, "none", None, None, None, 0)
+    check(fs.ledger_summary(fs.update_ledger(None, [unresolved]))["resolved"] == 0, "未到期的信号不计入汇总")
+
+    # 规则权重可由配置覆盖:权重 ≤ 0 即停用,未知规则名报错
+    from cryptoradar.signals import RULES, RULES_BY_ID, apply_weights
+    check([r.weight for r in apply_weights(None)] == [r.weight for r in RULES], "不配置时和内置权重完全一致")
+    rw = {r.id: r.weight for r in apply_weights({"OI_DIV": 0, "RESID": 3.0})}
+    check("OI_DIV" not in rw and rw["RESID"] == 3.0 and rw["VOL"] == RULES_BY_ID["VOL"].weight, "权重覆盖与停用生效")
+    try:
+        apply_weights({"NOPE": 1})
+        check(False, "未知规则名应报错")
+    except ValueError:
+        check(True, "未知规则名报错")
     print("\n" + fs.market_text(ms))
 
     print("\n[3] 完整命令行流程 + OKX 被拒绝时")
@@ -169,6 +195,7 @@ def main():
         check(s3.get("consecutive_errors") == 1, "连续错误计数")
         check(len(e3) == len(events2), "出错时事件和状态原样保留")
         check((tmp / "out" / "status.md").exists(), "status.md 已生成")
+        check((tmp / "out" / "ledger.csv").exists(), "ledger.csv 已生成(出错时也保留)")
         check("资金费率" in cloud_run.status_md(sig2, events2), "status.md 显示资金费率和每日成本")
         check("回购收益率" in cloud_run.status_md(sig2, events2), "status.md 显示回购收益率")
     finally:

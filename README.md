@@ -119,16 +119,38 @@ OI、多空比、主动买卖比来自币安官方数据站 data.binance.vision 
 
 第一行"基准"是任意时点开仓的表现,每个条件都应该和它比。
 
-## 五点五、调参与评分模型的滚动检验
+## 五点五、调参、权重学习与评分模型的样本外检验
 
 ```
-.venv\Scripts\python.exe tune.py                 用库里所有已回填的币(先 backfill.py --universe)
-.venv\Scripts\python.exe tune.py --folds 4 --top-pct 5 --min-n 30
+pip install -r requirements-research.txt                      梯度提升和报告表格需要(云端扫描不需要)
+.venv\Scripts\python.exe backfill_vision.py --bases-file syms.txt --start 2024-01-01   币安 API 被限制地区用这个回填
+.venv\Scripts\python.exe tune.py                 用库里所有已回填的币
+.venv\Scripts\python.exe tune.py --min-safe-lev 3 --pcts 2,5,10 --min-n 30
 ```
 
-把全部历史切成几段,每一轮"用前面的历史选阈值/训练模型,到紧接着的、没见过的时间段检验"(中间留 72 小时空档防止泄漏),
-对比四种触发方式:基准、当前规则、网格调参后的规则、逻辑回归评分模型。
-结果在 `reports/tune_report.md`。只有样本外的数字才有参考价值;调参规则如果不如当前规则,说明过拟合,不要采用。
+`backfill_vision.py` 的 K 线、资金费率、OI 全部读 data.binance.vision,不访问 fapi.binance.com(部分地区会返回 451);
+当月最后几天的资金费率数据站还没有,那段时间资金费率相关规则不触发。
+
+`tune.py` 比较六种触发方式(都只看做多:触发后 72 小时的 BTC 残差收益):基准、当前规则、
+**调参规则**(网格搜索阈值)、**学习权重**(规则权重由数据学出,系数为负的规则权重记 0 = 砍掉)、
+**逻辑回归**、**梯度提升**。
+
+- **选参统一规则**:训练段内部前 70% 拟合、后 30% 验证,在验证段按"事件数 ≥ min_n、平均残差收益 > 0、
+  `safe_lev` ≥ `--min-safe-lev`(默认 3 倍)的前提下 t 值最高"选参数;都不满足就不触发,不勉强给结果。
+- **两种检验**:滚动检验(前 40% 起步,后面 4 段逐段检验)和固定的前 70% 训练 / 后 30% 检验。训练与检验之间隔 72 小时防止泄漏。
+- 报告 `reports/tune_report.md` 含:汇总、自动判断(事件数够、t ≥ 2.5、高于基准和当前规则、safe_lev 达标才算"值得采用")、
+  每轮学出的权重、逻辑回归系数、梯度提升特征重要性。
+- 结论是"值得采用"时,把 `reports/suggested_weights.yaml` 的内容并入 `cloud_config.yaml` 的 `signals:` 下
+  (`rule_weights` 覆盖权重,权重 ≤ 0 即停用该规则;不配置则用内置权重)。
+
+只有样本外的数字才有参考价值;调参规则如果不如当前规则,说明过拟合,不要采用。
+
+## 五点六、实盘信号后验表
+
+云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
+24h/72h 真实收益(原始和相对 BTC)、持有期最大回撤。`status.md` 里有"实盘信号后验表(按规则)",
+列出每条规则的到期数、72h 超额中位、上涨比例、t 值和 safe_lev,样本少于 30 会标注。
+实盘样本攒够后,可以和 `research.py` / `tune.py` 的回测结果对照,看规则在实盘有没有失效。
 
 ## 六、离线自检
 
@@ -142,7 +164,9 @@ OI、多空比、主动买卖比来自币安官方数据站 data.binance.vision 
 
 ```
 monitor.py            实时监控入口
-backfill.py           历史回填
+backfill.py           历史回填(币安 API + 数据站)
+backfill_vision.py    历史回填(只用数据站,地区受限时用)
+tune.py               阈值/权重调参与评分模型的样本外检验
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/

@@ -97,18 +97,30 @@ def main() -> None:
         check(hit >= 0.8 * len(market.events), f"埋入的 {len(market.events)} 次事件识别出 {hit} 次,且都在事件发生之前")
         check(div.resid72_mean > base.resid72_mean + 0.03, "信号后的 72h 收益明显高于基准")
 
-        print("\n[5] 调参与评分模型的滚动检验(tune.py):流程跑通,且训练期始终早于检验期")
+        print("\n[5] 调参、学习权重与评分模型的样本外检验(tune.py):流程跑通,且训练期始终早于检验期")
         import numpy as np
         import tune
         pool = tune.load_frames(store, th, ["OPUSDT", "SOLUSDT", "ARBUSDT"])
         tune.GRID = {"oi_z": [2.0, 3.0], "resid_z": [2.5], "funding_z": [2.5], "min_score": [1.5, 2.5]}
-        per_fold, total, chosen, model = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3)
+        res = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3, min_lev=1.0)
+        per_fold, total, chosen = res["per_fold"], res["total"], res["chosen"]
         print(tune.fmt(total).to_string(index=False))
-        check(set(total["方法"]) == {"基准", "当前规则", "调参规则", "评分模型"}, "四种方法都有结果")
-        check(len(per_fold) == 8 and len(chosen) == 2, "每轮每种方法各一行")
-        check(all(np.isfinite(v) for v in model.coefs().values()), "模型系数有限")
-        tune.write_report(tmp / "reports", per_fold, total, chosen, model,
-                          type("A", (), {"folds": 2, "top_pct": 5.0})())
+        want = {"基准", "当前规则", "调参规则", "学习权重", "逻辑回归"} | ({"梯度提升"} if tune.have_sklearn() else set())
+        check(set(total["方法"]) == want, f"各方法都有结果:{sorted(want)}")
+        check(len(per_fold) == 2 * len(want) and len(chosen) == 2, "每轮每种方法各一行")
+        check(all(np.isfinite(v) for v in res["models"]["逻辑回归"].coefs().values()), "模型系数有限")
+        wb = res["weights_by_fold"][tune.RULE_IDS]
+        check((wb.to_numpy() >= 0).all() and (wb.max(axis=1) <= 2.0 + 1e-9).all(), "学出的权重非负且不超过 2.0")
+        # 约束:safe_lev 要求设得高到不可能满足时,调参规则/学习权重这一轮不触发,而不是勉强给结果
+        strict = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3, min_lev=1e6)
+        s_total = strict["total"].set_index("方法")
+        check(all(s_total.loc[m, "n"] == 0 for m in ("调参规则", "学习权重", "逻辑回归")),
+              "safe_lev 约束不可满足时不触发")
+        split = tune.run_tune(pool, th, folds=1, first_train=0.7, top_pct=5.0, min_n=3, min_lev=1.0)
+        check(len(split["per_fold"]) == len(want), "70/30 单次检验可运行")
+        args = type("A", (), {"folds": 2, "top_pct": 5.0, "min_n": 3, "min_safe_lev": 1.0})()
+        fw = tune.final_weights(pool, th, 3, 1.0)
+        tune.write_report(tmp / "reports", {"滚动检验": res, "70/30": split}, args, fw)
         check((tmp / "reports" / "tune_report.md").exists(), "报告已生成")
 
         print("\n全部通过 ✅")

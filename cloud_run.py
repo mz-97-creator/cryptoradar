@@ -11,6 +11,7 @@
   status.md     方便在 GitHub 网页上直接查看的中文摘要
   archive.csv.gz   全市场小时特征样本库(最近 180 天),历史概率用,随时间增长
   predictions.json 每条预警当时的历史概率和到期后的真实结果(记分卡)
+  ledger.csv    信号后验记录表:每条推送的信号一行(规则、得分、24h/72h 真实收益与回撤),永久累积
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from cryptoradar.config import load_config
 from cryptoradar.features import build_features
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
 from cryptoradar.okx_collect import collect
-from cryptoradar.signals import describe, evaluate_last, merged_thresholds
+from cryptoradar.signals import apply_weights, describe, evaluate_last, merged_thresholds
 from cryptoradar.universe import DEFAULT_EXCLUDE, _looks_like_stable, fetch_coingecko_top
 
 log = logging.getLogger("cloud")
@@ -155,6 +156,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         raise RuntimeError("BTC 数据获取失败,无法计算残差收益")
     btc, eth = data["BTC"][0], data.get("ETH", (pd.DataFrame(),))[0]
 
+    rules = apply_weights(sc.get("rule_weights"))
     results, frames = [], {}
     for u in uni:
         if u["ccy"] not in data:
@@ -168,7 +170,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
             failed.append(u["ccy"])
             log.warning("%s 特征计算失败:%s", u["ccy"], e)
             continue
-        results.append((u, f.iloc[-1], evaluate_last(f, th)))
+        results.append((u, f.iloc[-1], evaluate_last(f, th, rules)))
         frames[u["ccy"]] = f
 
     # 历史概率与市场状态(样本 = 本轮拉到的约 37 天 + data 分支里积累的样本库)
@@ -216,7 +218,8 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                 now, "signal", u["ccy"], c0, int(row.name), _num(row.get("close")),
                 fs.call_from(st, rates.get("baseline")) if cid else "none",
                 (st or {}).get("up72"), (rates.get("baseline") or {}).get("up72"),
-                (st or {}).get("med72"), (st or {}).get("n", 0), scope))
+                (st or {}).get("med72"), (st or {}).get("n", 0), scope,
+                rules=[r.id for r in fired], score=score, watch=u["watch"]))
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
 
@@ -364,6 +367,8 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 市场状态", fs.market_text(sig["market_state"])]
     if sig.get("scorecard_text"):
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
+    if sig.get("ledger_summary"):
+        lines += ["", "## 实盘信号后验表(按规则)"] + fs.ledger_text(sig["ledger_summary"])
     br = sig.get("base_rates") or {}
     if br.get("baseline"):
         b = br["baseline"]
@@ -427,6 +432,7 @@ def main() -> None:
     prev_signals = load_json(prev / "signals.json", {})
     prev_archive = fs.load_archive(prev / "archive.csv.gz")
     prev_preds = fs.load_predictions(prev / "predictions.json")
+    prev_ledger = fs.load_ledger(prev / "ledger.csv")
 
     code = 0
     try:
@@ -445,6 +451,8 @@ def main() -> None:
     else:
         signals["consecutive_errors"] = 0
 
+    ledger = fs.update_ledger(prev_ledger, preds)
+    signals["ledger_summary"] = fs.ledger_summary(ledger)
     (out / "signals.json").write_text(json.dumps(signals, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "events.json").write_text(json.dumps({"events": events}, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -453,6 +461,7 @@ def main() -> None:
         fs.save_archive(archive, out / "archive.csv.gz")
     (out / "predictions.json").write_text(json.dumps({"predictions": preds}, ensure_ascii=False),
                                           encoding="utf-8")
+    ledger.to_csv(out / "ledger.csv", index=False)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 
