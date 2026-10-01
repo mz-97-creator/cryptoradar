@@ -9,6 +9,8 @@
   events.json   最近 7 天的"新事件"(过了冷却期的新规则触发、价位穿越),Claude 定时任务读这个来推送
   state.json    冷却与价位状态
   status.md     方便在 GitHub 网页上直接查看的中文摘要
+  archive.csv.gz   全市场小时特征样本库(最近 180 天),历史概率用,随时间增长
+  predictions.json 每条预警当时的历史概率和到期后的真实结果(记分卡)
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from cryptoradar import foresight as fs
 from cryptoradar.config import load_config
 from cryptoradar.features import build_features
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
@@ -126,7 +129,8 @@ def build_universe(okx: OKX, cfg: dict, cached: dict | None = None) -> tuple[lis
     return rows, cache
 
 
-def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[dict, list, dict]:
+def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
+        prev_archive: pd.DataFrame | None = None, prev_preds: list | None = None):
     t0 = time.time()
     th = merged_thresholds(cfg["signals"].get("thresholds"))
     sc = cfg["signals"]
@@ -151,7 +155,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
         raise RuntimeError("BTC 数据获取失败,无法计算残差收益")
     btc, eth = data["BTC"][0], data.get("ETH", (pd.DataFrame(),))[0]
 
-    results = []
+    results, frames = [], {}
     for u in uni:
         if u["ccy"] not in data:
             continue
@@ -165,6 +169,23 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
             log.warning("%s 特征计算失败:%s", u["ccy"], e)
             continue
         results.append((u, f.iloc[-1], evaluate_last(f, th)))
+        frames[u["ccy"]] = f
+
+    # 历史概率与市场状态(样本 = 本轮拉到的约 37 天 + data 分支里积累的样本库)
+    combined = fs.merge_archive(prev_archive, frames)
+    labeled = fs.label_frames(combined, th)
+    watch_syms = [u["ccy"] for u in uni if u["watch"]]
+    rates = fs.base_rates(labeled, watch_syms)
+    mframe = fs.market_frame(combined)
+    mrates = fs.market_rates(mframe) if not mframe.empty else {}
+    mstate = fs.market_summary(mframe, mrates)
+    preds = list(prev_preds or [])
+
+    def outlook(sym: str, fired) -> tuple[str, str | None, dict | None, str]:
+        cid, st, scope = fs.pick_outlook([r.id for r in fired], sym, rates)
+        if not cid:
+            return "", None, None, ""
+        return "- 历史:" + fs.outlook_line(cid, st, rates["baseline"], scope), cid, st, scope
 
     last_fire = dict(prev_state.get("last_fire", {}))
     new_events, firing = [], []
@@ -173,6 +194,9 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
             continue
         score = sum(r.weight for r in fired)
         text = describe(u["ccy"], row, fired, u["rank"], u["watch"], LS_LABEL)
+        ol, cid, st, scope = outlook(u["ccy"], fired)
+        if ol:
+            text += "\n" + ol
         firing.append({"symbol": u["ccy"], "rank": u["rank"], "watch": u["watch"],
                        "rules": [r.id for r in fired], "score": score, "text": text})
         fresh = [r for r in fired if now - int(last_fire.get(f"{u['ccy']}|{r.id}", 0)) > cooldown]
@@ -184,7 +208,15 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                 "rule_names": [r.name for r in fired], "new_rules": [r.id for r in fresh],
                 "score": score, "price": _num(row.get("close")), "text": text,
                 "features": {k: _num(row.get(k)) for k in FEATURE_KEYS},
+                "outlook": {"cond": cid, "scope": scope, **(st or {})} if cid else None,
+                "call": fs.call_from(st, rates.get("baseline")) if cid else "none",
             })
+            c0 = cid or fired[0].id
+            preds.append(fs.new_prediction(
+                now, "signal", u["ccy"], c0, int(row.name), _num(row.get("close")),
+                fs.call_from(st, rates.get("baseline")) if cid else "none",
+                (st or {}).get("up72"), (rates.get("baseline") or {}).get("up72"),
+                (st or {}).get("med72"), (st or {}).get("n", 0), scope))
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
 
@@ -259,6 +291,22 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                          "price": prices.get(sym), "basis": b.get("basis", "")})
     buybacks.sort(key=lambda x: -(x["yield"] if x["yield"] is not None else -1))
 
+    # 市场红绿灯:状态切换时生成事件,并记入记分卡
+    prev_ms = prev_state.get("market_state")
+    if mstate and mstate["state"] != prev_ms:
+        new_events.append({"id": f"{now}-market-{mstate['state']}", "ts": now, "type": "market",
+                           "symbol": "MARKET", "state": mstate["state"], "prev_state": prev_ms,
+                           "text": fs.market_text(mstate)})
+        mst, mbase = mrates.get(mstate["state"]), mrates.get("ALL")
+        t_bar = int(mframe.dropna(subset=["state"]).index[-1])
+        preds.append(fs.new_prediction(now, "market", "ALT", mstate["state"], t_bar, None,
+                                       fs.market_call(mst, mbase), (mst or {}).get("alt_up72"),
+                                       (mbase or {}).get("alt_up72"), (mst or {}).get("alt_med72"),
+                                       (mst or {}).get("n", 0)))
+    preds = fs.resolve(preds, combined, mframe, now)
+    sc = fs.scorecard(preds, now)
+    archive = fs.archive_table(combined, now)
+
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
     market = {}
     if btc_row is not None:
@@ -274,8 +322,10 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
         "runtime_sec": round(time.time() - t0, 1),
         "scanned": len(results), "universe": len(uni), "universe_source": uni_cache["source"], "failed": failed,
         "market": market,
+        "market_state": mstate,
         "watchlist": [{"symbol": u["ccy"], "rank": u["rank"], "rules": [r.id for r in fired],
-                       "text": describe(u["ccy"], row, fired, u["rank"], True, LS_LABEL),
+                       "text": describe(u["ccy"], row, fired, u["rank"], True, LS_LABEL)
+                       + ("\n" + outlook(u["ccy"], fired)[0] if fired and outlook(u["ccy"], fired)[0] else ""),
                        "features": {k: _num(row.get(k)) for k in FEATURE_KEYS}}
                       for u, row, fired in results if u["watch"]],
         "firing": sorted(firing, key=lambda x: (-x["watch"], -x["score"])),
@@ -286,12 +336,20 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
         "funding_levels": fund_levels,
         "buybacks": buybacks,
         "new_events": len(new_events),
+        "base_rates": {"span_days": rates.get("span_days"), "coins": len(labeled),
+                       "baseline": rates.get("baseline"),
+                       "conditions": {cid: {"name": fs.RULES_BY_ID[cid].name, **st}
+                                      for cid, st in rates.get("conditions", {}).items()},
+                       "market": mrates},
+        "scorecard": sc,
+        "scorecard_text": fs.scorecard_text(sc),
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
     state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after},
-             "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache}
-    return signals, events, state
+             "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
+             "market_state": mstate.get("state") if mstate else prev_ms}
+    return signals, events, state, archive, preds
 
 
 def status_md(sig: dict, events: list) -> str:
@@ -302,6 +360,20 @@ def status_md(sig: dict, events: list) -> str:
     if m:
         lines.append(f"BTC ${m['btc_price']:,.0f} (24h {m['btc_ret_24h'] * 100:+.1f}%) · "
                      f"扫描 {sig.get('scanned')} 个合约 · 用时 {sig.get('runtime_sec')} 秒")
+    if sig.get("market_state"):
+        lines += ["", "## 市场状态", fs.market_text(sig["market_state"])]
+    if sig.get("scorecard_text"):
+        lines += ["", "## 预警记分卡", sig["scorecard_text"]]
+    br = sig.get("base_rates") or {}
+    if br.get("baseline"):
+        b = br["baseline"]
+        lines += ["", f"## 历史概率(样本 {br['coins']} 个币 · {br['span_days']} 天,72h)",
+                  "| 情形 | 次数 | 上涨概率 | 中位收益 | 最差 10% | 期间回撤中位 |", "|---|---|---|---|---|---|",
+                  f"| 任意时点(基准) | {b['n']} | {b['up72'] * 100:.0f}% | {b['med72'] * 100:+.1f}% | "
+                  f"{b['p10_72'] * 100:+.1f}% | {b['mae72_med'] * 100:+.1f}% |"]
+        for cid, c in sorted(br.get("conditions", {}).items(), key=lambda kv: -kv[1]["up72"]):
+            lines.append(f"| {c['name']} | {c['n']} | {c['up72'] * 100:.0f}% | {c['med72'] * 100:+.1f}% | "
+                         f"{c['p10_72'] * 100:+.1f}% | {c['mae72_med'] * 100:+.1f}% |")
     lines += ["", "## 自选"] + [w["text"] + "\n" for w in sig.get("watchlist", [])]
     seen = set()
     for fl in sig.get("funding_levels", []):
@@ -353,10 +425,13 @@ def main() -> None:
     prev_state = load_json(prev / "state.json", {})
     prev_events = load_json(prev / "events.json", {}).get("events", [])
     prev_signals = load_json(prev / "signals.json", {})
+    prev_archive = fs.load_archive(prev / "archive.csv.gz")
+    prev_preds = fs.load_predictions(prev / "predictions.json")
 
     code = 0
     try:
-        signals, events, state = run(cfg, OKX(), prev_state, prev_events, tz)
+        signals, events, state, archive, preds = run(cfg, OKX(), prev_state, prev_events, tz,
+                                                     prev_archive, prev_preds)
     except Exception as e:
         log.error("运行失败:%s", traceback.format_exc())
         code = 1
@@ -366,6 +441,7 @@ def main() -> None:
                         "consecutive_errors": int(prev_signals.get("consecutive_errors", 0)) + 1})
         signals.setdefault("generated_at", 0)
         events, state = prev_events, prev_state
+        archive, preds = prev_archive, prev_preds
     else:
         signals["consecutive_errors"] = 0
 
@@ -373,6 +449,10 @@ def main() -> None:
     (out / "events.json").write_text(json.dumps({"events": events}, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     (out / "status.md").write_text(status_md(signals, events), encoding="utf-8")
+    if archive is not None and len(archive):
+        fs.save_archive(archive, out / "archive.csv.gz")
+    (out / "predictions.json").write_text(json.dumps({"predictions": preds}, ensure_ascii=False),
+                                          encoding="utf-8")
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 

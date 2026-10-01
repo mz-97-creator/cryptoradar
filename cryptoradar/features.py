@@ -99,6 +99,7 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     rng = (df["high"].rolling(24, min_periods=20).max() - df["low"].rolling(24, min_periods=20).min())
     f["range_24h"] = rng / df["close"]
     f["adr_14d"] = f["range_24h"].rolling(336, min_periods=72).mean()
+    f["range_z"] = rolling_z(_safe_log(f["range_24h"]))  # 波动率相对自身是否被压缩
 
     if eth is not None and not eth.empty:
         elc = _safe_log(eth["close"]).reindex(idx)

@@ -13,6 +13,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import cloud_run
+import numpy as np
+import pandas as pd
+
+from cryptoradar import foresight as fs
 from cryptoradar import universe
 from cryptoradar.config import DEFAULTS, _merge
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
@@ -61,6 +65,17 @@ class FakeOKX(OKX):
         raise AssertionError(path)
 
 
+def _op_frame(m):
+    """OP 与 BTC 的特征表(只用价格列),给记分卡测试用。"""
+    import pandas as pd
+    def hourly(sym):
+        d = m.data[sym]
+        return pd.DataFrame({"open": d.open, "high": d.high, "low": d.low, "close": d.close,
+                             "quote_volume": d.volume * d.close, "oi": d.oi, "top_ls": d.top_ls,
+                             "taker_ratio": d.taker})
+    return hourly("OPUSDT"), hourly("BTCUSDT")
+
+
 def check(cond, msg):
     print(("  ✔ " if cond else "  ✘ ") + msg)
     if not cond:
@@ -84,7 +99,7 @@ def main():
     m = Market(hours=1000)
 
     print("\n[1] 第一轮")
-    sig, events, state = cloud_run.run(cfg, FakeOKX(m), {}, [], tz)
+    sig, events, state, archive, preds = cloud_run.run(cfg, FakeOKX(m), {}, [], tz)
     syms = {e["symbol"]: e for e in events if e["type"] == "signal"}
     check(sig["scanned"] >= 6, f"扫描 {sig['scanned']} 个合约")
     check("OI_DIV" in syms.get("OP", {}).get("rules", []), f"OP 产生 OI 背离事件:{syms.get('OP', {}).get('rules')}")
@@ -99,9 +114,43 @@ def main():
     print("\n" + sig["watchlist"][0]["text"] + "\n")
 
     print("[2] 第二轮(冷却期内)")
-    sig2, events2, state2 = cloud_run.run(cfg, FakeOKX(m), state, events, tz)
+    sig2, events2, state2, archive2, preds2 = cloud_run.run(cfg, FakeOKX(m), state, events, tz, archive, preds)
     check(sig2["new_events"] == 0, "没有重复事件")
     check(len(events2) == len(events), "事件日志保留")
+
+    print("\n[2b] 前瞻模块:市场灯、历史概率、样本库、记分卡")
+    ms = sig.get("market_state") or {}
+    check(ms.get("state") in fs.STATES, f"市场状态:{ms.get('icon')} {ms.get('title')}")
+    check(any(e["type"] == "market" for e in events), "市场灯首次判定生成事件")
+    check(not any(e["type"] == "market" for e in events2[len(events):]), "状态未变不重复推送")
+    br = sig["base_rates"]
+    check(br["baseline"] and br["baseline"]["n"] > 50, f"基准样本 {br['baseline']['n']} · 条件 {len(br['conditions'])} 个")
+    op_ev = next(e for e in events if e["type"] == "signal" and e["symbol"] == "OP")
+    check(op_ev.get("outlook") and "历史:" in op_ev["text"], "事件附带历史概率")
+    check(any(p["kind"] == "signal" for p in preds) and any(p["kind"] == "market" for p in preds), "预警写入记分卡")
+
+    # 样本库:读写一致,且比实时窗口更早的样本会被保留
+    tmpa = Path(tempfile.mkdtemp()) / "archive.csv.gz"
+    fs.save_archive(archive, tmpa)
+    back = fs.load_archive(tmpa)
+    check(len(back) == len(archive) and set(back["symbol"]) == set(archive["symbol"]), f"样本库读写 {len(back)} 行")
+    old = back[back.symbol == "OP"].head(1).copy()
+    old["ts"] = int(old["ts"].iloc[0]) - 500 * HOUR_MS
+    sig3, _, _, archive3, _ = cloud_run.run(cfg, FakeOKX(m), state2, events2, tz,
+                                            pd.concat([back, old]), preds2)
+    check(int(archive3[archive3.symbol == "OP"]["ts"].min()) == int(old["ts"].iloc[0]), "更早的样本被保留,样本库会增长")
+
+    # 记分卡:构造一条 100 小时前的预测,核对 24h/72h 收益与直接计算一致
+    f = fs.merge_archive(None, {"OP": cloud_run.build_features(*_op_frame(m))})["OP"]
+    t0 = int(f.index[-100])
+    pr = fs.new_prediction(t0, "signal", "OP", "OI_DIV", t0, None, "up", 0.6, 0.5, 0.01, 30)
+    res = fs.resolve([pr], {"OP": f, "BTC": f}, pd.DataFrame(), t0 + 100 * HOUR_MS)[0]["res"]
+    want = f.at[t0 + 72 * HOUR_MS, "close"] / f.at[t0, "close"] - 1
+    check(abs(res["72h"]["ret"] - want) < 1e-12 and "24h" in res, f"到期核对正确:72h {res['72h']['ret'] * 100:+.2f}%")
+    future = fs.new_prediction(t0, "signal", "OP", "OI_DIV", int(f.index[-10]), None, "up", .6, .5, .01, 30)
+    check(fs.resolve([future], {"OP": f}, pd.DataFrame(), int(f.index[-1]))[0]["res"] == {}, "未到期的不提前核对")
+    print("  " + fs.scorecard_text(fs.scorecard([dict(pr, res=res, ts=t0 + 100 * HOUR_MS)], t0 + 100 * HOUR_MS)))
+    print("\n" + fs.market_text(ms))
 
     print("\n[3] 完整命令行流程 + OKX 被拒绝时")
     tmp = Path(tempfile.mkdtemp())

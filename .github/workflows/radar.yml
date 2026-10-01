@@ -5,8 +5,10 @@ on:
     - cron: "*/15 * * * *"     # 每 15 分钟(GitHub 高峰期可能延迟几分钟)
   workflow_dispatch:            # 可在 Actions 页面手动运行
   push:
-    branches: [main]
+    # tick 分支:Claude 定时任务推送前先推一次 tick.txt 触发新扫描(GitHub 自带的定时触发经常延迟几个小时)
+    branches: [main, tick]
     paths:
+      - "tick.txt"
       - "cloud_run.py"
       - "cloud_config.yaml"
       - "cryptoradar/**"
@@ -25,6 +27,8 @@ jobs:
     timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main   # 不管由哪个分支触发,都运行 main 上的代码
 
       - uses: actions/setup-python@v5
         with:
@@ -38,7 +42,7 @@ jobs:
         run: |
           mkdir -p prev
           if git fetch --depth=1 origin data 2>/dev/null; then
-            for f in state.json events.json signals.json; do
+            for f in state.json events.json signals.json archive.csv.gz predictions.json; do
               git show FETCH_HEAD:$f > prev/$f 2>/dev/null || rm -f prev/$f
             done
           fi
