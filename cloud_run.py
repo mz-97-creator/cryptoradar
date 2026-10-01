@@ -389,12 +389,12 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
 def opportunity_md(o: dict, live: dict | None) -> list[str]:
     by = {c["symbol"]: c for c in o["coins"]}
     row = lambda c: (f"| {c['symbol']} | {c['vol_range'] * 100:.0f}% | {c['mae_q10'] * 100:+.0f}% | {c['safe_lev']:.1f}x | "
-                     f"{c['p_up'] * 100:.0f}% | {c['p_dn'] * 100:.0f}% | {c['direction']}({c['direction_evidence']}) |")
-    head = ["| 币 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 方向(证据) |", "|---|---|---|---|---|---|---|"]
+                     f"{c['p_up'] * 100:.0f}% | {c['p_dn'] * 100:.0f}% | 波动#{c['rank_vol_range']} |")
+    head = ["| 币 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 排名 |", "|---|---|---|---|---|---|---|"]
     lines = []
     if o.get("watch_highlights"):
         lines += ["**自选里值得留意的**:" + ";".join(f"{h['symbol']}({'、'.join(h['reasons'])})" for h in o["watch_highlights"]), ""]
-    for title, key in [("波动最大", "top_vol"), ("上涨概率最高", "top_p_up"), ("下跌概率最高", "top_p_dn"), ("自选", "watchlist")]:
+    for title, key in [("波动最大(两头概率同步偏高)", "top_vol"), ("自选", "watchlist")]:
         syms = o.get(key) or []
         if syms:
             lines += [f"**{title}**"] + head + [row(by[s]) for s in syms if s in by] + [""]

@@ -165,14 +165,14 @@ class Models:
         X = tr[self.feats]
         up, dn = (tr["fwd_resid_72h"] > self.thr), (tr["fwd_resid_72h"] < -self.thr)
         self.base_up, self.base_dn = float(up.mean()), float(dn.mean())
+        self.up = C(**_hgb_kwargs()).fit(X, up)      # 分类树:scale 模式下只用来算"方向倾向",不用于概率
+        self.dn = C(**_hgb_kwargs()).fit(X, dn)
         if self.prob == "scale":
             y = tr["lrv72"].to_numpy()
             self.scale = R(**_hgb_kwargs()).fit(X, y)
             z = tr["fwd_resid_72h"].to_numpy() / np.exp(_oof_reg(X, y, tr["ts"]))   # 样本外标准化收益
             self.z_sorted = np.sort(z[np.isfinite(z)])
         else:
-            self.up = C(**_hgb_kwargs()).fit(X, up)
-            self.dn = C(**_hgb_kwargs()).fit(X, dn)
             if self.calib == "cv":
                 self.cal_up = Platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))
                 self.cal_dn = Platt(_oof_proba(X, dn.to_numpy(float), tr["ts"]), dn.to_numpy(float))
@@ -188,6 +188,8 @@ class Models:
     def predict(self, d: pd.DataFrame) -> pd.DataFrame:
         X, Xv = d[self.feats], d[VOL_FEATS]
         out = pd.DataFrame(index=d.index)
+        t_up, t_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
+        out["tilt"] = t_up - t_dn            # 方向倾向:同一波动水平下偏涨还是偏跌(样本外证据弱,见 direction_evidence)
         if self.prob == "scale":
             sig = np.exp(self.scale.predict(X))
             n = len(self.z_sorted)
@@ -196,9 +198,8 @@ class Models:
             out["p_up_raw"], out["p_dn_raw"] = out["p_up"], out["p_dn"]
             out["sigma72"] = sig
         else:
-            raw_up, raw_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
-            out["p_up_raw"], out["p_dn_raw"] = raw_up, raw_dn
-            out["p_up"], out["p_dn"] = self.cal_up(raw_up), self.cal_dn(raw_dn)
+            out["p_up_raw"], out["p_dn_raw"] = t_up, t_dn
+            out["p_up"], out["p_dn"] = self.cal_up(t_up), self.cal_dn(t_dn)
         out["pred_lrange"] = self.rng.predict(X)
         out["pred_mae_q10"] = np.minimum(self.mae.predict(X), -1e-3)
         out["pv_up"] = self.up_v.predict_proba(Xv)[:, 1]
@@ -221,19 +222,23 @@ def score_rows(models: Models, last: pd.DataFrame, topk: int = 8, evidence: dict
     R["预测波动幅度"] = np.exp(R["pred_lrange"])
     R["vol_range"], R["mae_q10"] = R["预测波动幅度"], R["pred_mae_q10"]
     R["可承受杠杆(90%)"] = 1 / R["pred_mae_q10"].abs()
-    R["方向分(P上-P下)"] = R["p_up"] - R["p_dn"]
-    rk = R["方向分(P上-P下)"].rank(method="first", ascending=False)
-    R["方向"] = np.where(rk <= topk, "偏涨", np.where(rk > len(R) - topk, "偏跌", "中性"))
+    R["方向分(P上-P下)"] = R["tilt"]
+    rk = R["tilt"].rank(method="first", ascending=False)
+    tier = np.where(rk <= topk, "偏涨", np.where(rk > len(R) - topk, "偏跌", "中性"))
     ev = evidence or {}
-    R["该档位历史:涨>阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("涨"))
-    R["该档位历史:跌<-阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("跌"))
-    R["该档位历史:72h超额均值"] = R["方向"].map(lambda d: ev.get(d, {}).get("超额"))
-    R["证据强度"] = R["方向"].map(lambda d: ev.get(d, {}).get("强度", ""))
+    # 证据弱(样本外 |t|<2 或方向相反)时不下结论,只保留档位供研究
+    R["方向档位(研究)"] = tier
+    R["方向"] = [t if t == "中性" or not str(ev.get(t, {}).get("强度", "弱")).startswith("弱") else "无明确方向" for t in tier]
+    ev = {k: v for k, v in ev.items()}
+    R["该档位历史:涨>阈值比例"] = R["方向档位(研究)"].map(lambda d: ev.get(d, {}).get("涨"))
+    R["该档位历史:跌<-阈值比例"] = R["方向档位(研究)"].map(lambda d: ev.get(d, {}).get("跌"))
+    R["该档位历史:72h超额均值"] = R["方向档位(研究)"].map(lambda d: ev.get(d, {}).get("超额"))
+    R["证据强度"] = R["方向档位(研究)"].map(lambda d: ev.get(d, {}).get("强度", ""))
     R[f"P上(>+{models.thr:.0%})"] = R["p_up"]
     R[f"P下(<-{models.thr:.0%})"] = R["p_dn"]
     R["数据时间"] = pd.to_datetime(R["ts"], unit="ms")
     R = R.rename(columns={"ts": "t_bar"})
-    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "p_up_raw", "p_dn_raw", "pred_mae_q10", "sigma72"],
+    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "p_up_raw", "p_dn_raw", "pred_mae_q10", "sigma72", "tilt"],
                   errors="ignore").reset_index(drop=True)
 
 
@@ -264,7 +269,8 @@ def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[d
                       "price": num(r["close"]), "vol_range": num(r["vol_range"]),
                       "mae_q10": num(r["mae_q10"]), "safe_lev": num(r["可承受杠杆(90%)"]),
                       "p_up": num(r["p_up"]), "p_dn": num(r["p_dn"]),
-                      "direction": r["方向"], "direction_evidence": r["证据强度"],
+                      "direction": r["方向"], "direction_tier_research": r["方向档位(研究)"],
+                      "direction_evidence": r["证据强度"] or "—",
                       "t_bar": int(r["t_bar"])})
     top = lambda key: [c["symbol"] for c in sorted(coins, key=lambda c: -(c[key] or 0))[:topk]]
     # 每个币在全部币里的排名(1 = 最高),自选币有任何一项进前 notable_rank 名就单独标出来
@@ -292,10 +298,10 @@ def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[d
             "绝对数值有约 ±4~6 个百分点的误差,币与币之间的相对高低更可靠;高波动的币两头概率都会偏高",
             "mae_q10 = 持有期最大回撤的 10% 分位(90% 的情形回撤不会比它更深),safe_lev = 1/|mae_q10|,"
             "未计手续费和维持保证金,实际应更保守",
-            "direction(偏涨/偏跌)按 p_up-p_dn 的截面排名划分,样本外检验证据弱(见 direction_evidence),不能当作买卖结论",
+            "direction:目前没有统计上站得住的方向判断(样本外 t 值不足),一律为「无明确方向」;研究中的档位见 direction_tier_research",
         ],
         "coins": coins,
-        "top_vol": top("vol_range"), "top_p_up": top("p_up"), "top_p_dn": top("p_dn"),
+        "top_vol": top("vol_range"),
         "watchlist": [c["symbol"] for c in coins if c["watch"]],
         "watch_highlights": highlights, "n_coins": len(coins),
     }

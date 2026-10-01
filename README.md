@@ -161,7 +161,10 @@ pip install -r requirements-research.txt                      梯度提升和报
 ### 云端的机会榜
 
 云端每次扫描会用 `models/opportunity_price.joblib` 给每个币打分,写进 `signals.json` 的 `opportunity`(`status.md` 里也有一节):
-预测 72h 波动幅度、回撤 q10 与杠杆上限、上涨/下跌概率、方向档位及其证据强度。
+预测 72h 波动幅度、回撤 q10 与杠杆上限、上涨/下跌概率、各项排名,以及自选币里排名靠前的"值得留意"项(`watch_highlights`)。
+上涨/下跌概率的做法:先预测这个币未来 72h 剔除 BTC 后的波动尺度 σ,再用"收益/σ"的样本外历史分布推出概率,
+所以波动越大两头概率越高、榜单顺序与波动榜相同——这不是缺陷,而是现有特征里确实没有方向信息的直接体现;
+方向标签(direction)在样本外 t 值不足时一律输出"无明确方向",研究中的档位保留在 `direction_tier_research`。
 云端数据来自 OKX,而模型用币安历史训练,所以云端用**价格模型**(只用价格与成交额派生的特征;实测两个交易所的这类特征相关性 0.95~1.00,
 而持仓量、资金费率、多空比、主动买卖比差别很大,所以不用)。模型包出错或没装 scikit-learn 时只会跳过这一块,不影响主扫描。
 重新训练并导出(需先回填到最新):
@@ -196,12 +199,13 @@ backfill.py           历史回填(币安 API + 数据站)
 backfill_vision.py    历史回填(只用数据站,地区受限时用)
 tune.py               阈值/权重调参与评分模型的样本外检验
 model.py              72 小时机会模型(波动/上涨/下跌概率/回撤)的评估、当前排名与导出
-horizon_study.py      方向研究:72h/1周/2周/4周下的相对强弱排序(现有特征 + 经典跨币因子)
+horizon_study.py      方向研究:1周/2周/4周下的相对强弱排序(现有特征 + 经典跨币因子 + DefiLlama),Newey-West 校正的 t 值
 research.py           事件研究
 config.example.yaml   配置模板
 cryptoradar/
   binance_api.py      币安公开接口(含限速)
   opportunity.py      72h 机会模型的特征、模型、校准与云端打分(训练评估和云端共用)
+  defillama.py        DefiLlama 免费接口:公链/协议 TVL 与费用(解锁/排放数据是付费接口,不用)
   universe.py         市值前 N ∩ 币安永续 的名单映射
   collector.py        增量采集
   features.py         特征计算(监控与研究共用,避免回测和实盘两套代码)

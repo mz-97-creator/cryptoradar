@@ -87,7 +87,7 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
                        "funding", "btc_ret_30d"]], P], axis=1)
     T["up"] = (T["fwd_resid_72h"] > thr).astype(float)
     T["dn"] = (T["fwd_resid_72h"] < -thr).astype(float)
-    T["dir"] = T["p_up"] - T["p_dn"]
+    T["dir"] = T["tilt"]
     T["dir_v"] = T["pv_up"] - T["pv_dn"]
     h0 = int(T["ts"].min() // HOUR)
     CS = T[((T["ts"] // HOUR) - h0) % H == 0]            # 间隔 72h 的截面,互不重叠
