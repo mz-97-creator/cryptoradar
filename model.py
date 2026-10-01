@@ -10,7 +10,7 @@
 评估(全部样本外,训练与检验之间隔 72 小时):
   - 按时间截面算 Spearman IC:每个时间点把所有币按预测排序,和真实结果比;截面间隔 72 小时,互不重叠,
     t 值用截面序列算,避免"同一时间很多币共享同一波行情"造成的虚高
-  - 前 k 名 / 后 k 名的真实表现,扣除手续费与资金费率后的净收益
+  - 前 k 名 / 后 k 名的真实表现,以及粗略扣除固定成本和资金费率后的超额(这不是可交易回测,见报告第 5 节的说明)
   - 概率校准:预测 60% 的时候实际是不是约 60%;Brier 技能分(对比"只看波动"的基线和历史平均)
   - 对照:波动靠"最近的波动",方向靠"现行规则得分"。模型必须赢过它们才有意义
   - 按大盘风格(BTC 30 天上行/横盘/下行)拆分
@@ -120,9 +120,9 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
     fund_l = (long_["funding"].fillna(0) * 9).mean()
     fund_s = (short_["funding"].fillna(0) * 9).mean()
     res["pnl"] = {"做多前k 毛": long_["fwd_resid_72h"].mean(),
-                  "做多前k 净": long_["fwd_resid_72h"].mean() - cost - fund_l,
+                  "做多前k 粗扣成本后": long_["fwd_resid_72h"].mean() - cost - fund_l,
                   "做空后k 毛": -short_["fwd_resid_72h"].mean(),
-                  "做空后k 净": -short_["fwd_resid_72h"].mean() - cost + fund_s,
+                  "做空后k 粗扣成本后": -short_["fwd_resid_72h"].mean() - cost + fund_s,
                   "全体均值": CS["fwd_resid_72h"].mean(), "n多": len(long_), "n空": len(short_)}
 
     # 方向档位:按 P上-P下 取前 k("偏涨")/后 k("偏跌"),看真实结果;价差序列用于算 t
@@ -168,7 +168,7 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
 
 
 def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: int, cost: float,
-             calib: str = "cv", feature_set: str = "full", prob: str = "scale") -> dict:
+             calib: str = "cv", feature_set: str = "full", prob: str = "scale", forward: bool = True) -> dict:
     lab = D[TRAIN_COLS].notna().all(axis=1)
     L = D[lab]
     ts_all = D["ts"].to_numpy()
@@ -181,7 +181,7 @@ def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: 
         tr = L[(L["ts"] < lo - EMBARGO) & (L["h"] % 6 == 0)]
         te = L[(L["ts"] >= lo) & (L["ts"] < hi)]
         log.info("第 %d/%d 轮:训练 %d 行,检验 %d 行", k + 1, folds, len(tr), len(te))
-        m = Models(thr, calib, feature_set, prob).fit(tr)
+        m = Models(thr, calib, feature_set, prob, forward).fit(tr)
         r = evaluate_fold(m, te, topk, cost, thr)
         r["fold"] = k + 1
         r["window"] = (pd.to_datetime(lo, unit="ms").date(), pd.to_datetime(hi, unit="ms").date())
@@ -267,8 +267,11 @@ def section(tag: str, res: dict, P: dict, args) -> list[str]:
         md += [f"**{key}**:Brier 技能分(越大越好,0=和基线一样):\n", _t(P["brier"][key].to_frame("均值").T), "\n",
                "校准曲线(预测均值应接近实际频率):\n", _t(P["calib"][key]), "\n"]
     md += ["### 4. 回撤 q10 是否可靠(越界比例应约 10%)\n", f"总体越界比例 {P['mae_cov_all']:.1%}\n", _t(P["mae_cov"]), "\n"]
-    md += [f"### 5. 扣成本后的组合(每 72h 一期,k={args.topk},成本 {args.cost:.2%}/期 + 资金费率)\n",
-           _t(P["pnl"].to_frame("均值").T, ["做多前k 毛", "做多前k 净", "做空后k 毛", "做空后k 净", "全体均值"]), "\n"]
+    md += [f"### 5. 粗略的成本估算(不是可交易回测;每 72h 一期,k={args.topk},固定成本 {args.cost:.2%}/期 + 资金费率近似)\n",
+           "这里只是把「相对 BTC 的超额收益」减去一个固定成本和资金费率近似值。**没有**模拟与之配套的 BTC 对冲腿、"
+           "成交时点(信号出现后的下一根 K 线才能成交)、多期持仓重叠下的资金占用与资金曲线,所以这些数字不是账户能赚到的钱,"
+           "只用来判断「毛收益是否大到值得继续做完整回测」。\n",
+           _t(P["pnl"].to_frame("均值").T, ["做多前k 毛", "做多前k 粗扣成本后", "做空后k 毛", "做空后k 粗扣成本后", "全体均值"]), "\n"]
     md += ["### 6. 按大盘风格拆分的方向 IC\n", _t(pd.DataFrame(P["regime"]).T), "\n"]
     md += ["### 7. 方向档位的历史实绩(推送里「偏涨/偏跌」标签对应的真实表现)\n",
            _t(P["tiers"], ["72h超额均值", "涨>阈值 实际比例", "跌<-阈值 实际比例", "72h超额>0 比例"]), "\n",

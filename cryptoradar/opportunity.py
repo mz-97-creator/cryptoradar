@@ -115,12 +115,25 @@ def _oof_proba(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np
     return out
 
 
-def _oof_reg(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np.ndarray:
-    """同 _oof_proba,但是回归:得到整个训练期"样本外"的预测值。"""
+def _oof_reg(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5, forward: bool = True) -> np.ndarray:
+    """训练期内"样本外"预测,用来估计模型的预测误差分布。
+    forward=True(默认):只用过去预测未来——按时间切成 nb+1 块,第 k 块只用前面的块(中间隔 72h)训练,第一块没有过去可用、留空。
+                      这和真实部署的顺序一致。
+    forward=False:    每块用"其余所有块(含它之后的)"训练,历史上用过,留作对照;它用了未来信息,误差分布会比真实部署时偏乐观。"""
     from sklearn.ensemble import HistGradientBoostingRegressor as R
+    out = np.full(len(X), np.nan)
+    if forward:
+        q = np.quantile(ts, np.linspace(0, 1, nb + 2))
+        q[-1] += 1
+        for i in range(1, nb + 1):
+            blk = ((ts >= q[i]) & (ts < q[i + 1])).to_numpy()
+            past = (ts < q[i] - EMBARGO).to_numpy()
+            if past.sum() < 5000 or not blk.any():
+                continue
+            out[blk] = R(**_hgb_kwargs()).fit(X[past], y[past]).predict(X[blk])
+        return out
     q = np.quantile(ts, np.linspace(0, 1, nb + 1))
     q[-1] += 1
-    out = np.full(len(X), np.nan)
     for i in range(nb):
         blk = ((ts >= q[i]) & (ts < q[i + 1])).to_numpy()
         keep = ~((ts > q[i] - EMBARGO) & (ts < q[i + 1] + EMBARGO)).to_numpy()
@@ -156,8 +169,9 @@ class Models:
     概率的局限(样本外实测):全市场"当期有多少币大跌"随行情漂移、很难预测,所以绝对概率有约 ±4pp 的不确定性,
     币与币之间的相对高低比绝对数值可靠。"""
 
-    def __init__(self, thr: float = 0.05, calib: str = "cv", feature_set: str = "full", prob: str = "scale"):
-        self.thr, self.calib, self.feature_set, self.prob = thr, calib, feature_set, prob
+    def __init__(self, thr: float = 0.05, calib: str = "cv", feature_set: str = "full", prob: str = "scale",
+                 forward: bool = True):
+        self.thr, self.calib, self.feature_set, self.prob, self.forward = thr, calib, feature_set, prob, forward
         self.feats = FEATURE_SETS[feature_set]
 
     def fit(self, tr: pd.DataFrame) -> "Models":
@@ -170,8 +184,13 @@ class Models:
         if self.prob == "scale":
             y = tr["lrv72"].to_numpy()
             self.scale = R(**_hgb_kwargs()).fit(X, y)
-            z = tr["fwd_resid_72h"].to_numpy() / np.exp(_oof_reg(X, y, tr["ts"]))   # 样本外标准化收益
+            ret = tr["fwd_resid_72h"].to_numpy()
+            z = ret / np.exp(_oof_reg(X, y, tr["ts"], forward=self.forward))   # 样本外标准化收益
+            if np.isfinite(z).sum() < 2000:     # 训练数据太少,"只用过去"凑不出足够的样本外点:退回分块方式(并非部署顺序,仅作兜底)
+                z = ret / np.exp(_oof_reg(X, y, tr["ts"], forward=False))
             self.z_sorted = np.sort(z[np.isfinite(z)])
+            if len(self.z_sorted) == 0:
+                raise ValueError("训练样本不足,无法估计标准化收益分布")
         else:
             if self.calib == "cv":
                 self.cal_up = Platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))

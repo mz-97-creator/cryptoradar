@@ -131,7 +131,7 @@ def study(D: pd.DataFrame, h: int, topk: int, cost: float, folds: int = 4, first
                 res[f"{tag}-全体"] = sp.mean()
                 res[f"{tag}_t(NW)"] = nw_t(sp, lags)
             top = model._topk(CS, "s", topk, "fwd_resid_72h", False)
-            res["前k 净收益(扣成本)"] = top["fwd_resid_72h"].mean() - cost
+            res["前k 超额(粗扣成本,非可交易回测)"] = top["fwd_resid_72h"].mean() - cost
             rows.append(res)
             log.info("h=%d %-18s %-12s IC=%.3f(t=%.1f) 前k=%+.2f%%(t=%.1f) 后k=%+.2f%%(t=%.1f)", h, name, scope, res["IC"],
                      res["IC_t(NW)"], res["前k-全体"] * 100, res["前k_t(NW)"], res["后k-全体"] * 100, res["后k_t(NW)"])

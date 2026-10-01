@@ -232,12 +232,12 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                 "score": score, "price": _num(row.get("close")), "text": text,
                 "features": {k: _num(row.get(k)) for k in FEATURE_KEYS},
                 "outlook": {"cond": cid, "scope": scope, **(st or {})} if cid else None,
-                "call": fs.call_from(st, rates.get("baseline")) if cid else "none",
+                "call": fs.call_from(st, rates.get("baseline"), cid) if cid else "none",
             })
             c0 = cid or fired[0].id
             preds.append(fs.new_prediction(
                 now, "signal", u["ccy"], c0, int(row.name), _num(row.get("close")),
-                fs.call_from(st, rates.get("baseline")) if cid else "none",
+                fs.call_from(st, rates.get("baseline"), cid) if cid else "none",
                 (st or {}).get("up72"), (rates.get("baseline") or {}).get("up72"),
                 (st or {}).get("med72"), (st or {}).get("n", 0), scope,
                 rules=[r.id for r in fired], score=score, watch=u["watch"]))
