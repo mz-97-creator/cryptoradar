@@ -137,6 +137,8 @@ def main():
     check(all(c["mae_q10"] < 0 and c["safe_lev"] > 0 and c["vol_range"] > 0 for c in cs_), "回撤为负、杠杆上限与波动为正")
     check(ob["top_vol"] and set(ob["top_vol"]) <= {c["symbol"] for c in cs_}, "波动榜在名单内")
     check(all(c["direction_evidence"] for c in cs_), "每个币都带方向证据强度")
+    check(all({"rank_vol_range", "rank_p_up", "rank_p_dn"} <= set(c) for c in cs_), "每个币带三项排名")
+    check(all(set(h) == {"symbol", "reasons"} and h["reasons"] for h in ob["watch_highlights"]), "自选关注项含原因")
     check("机会榜" in cloud_run.status_md(sig, events), "status.md 含机会榜")
     check(sig["opportunity_live"]["resolved"] == 0, "实盘核对:刚上线时无已结算记录")
 

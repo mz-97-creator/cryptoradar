@@ -21,7 +21,7 @@ H = 72
 EMBARGO = H * HOUR
 
 PRICE_COIN = ["ret_24h", "ret_72h", "ret_7d", "resid_24h_z", "ret_1h_z", "vol_z", "range_24h", "adr_14d",
-              "range_z", "rv_24h", "rv_7d", "ethbtc_ret_24h"]
+              "range_z", "rv_24h", "rv_7d", "ethbtc_ret_24h", "resid_rv_7d", "resid_rv_30d"]
 DERIV_COIN = ["oi_chg_24h", "oi_z", "funding", "funding_z", "top_ls_z", "taker_z", "beta"]
 PRICE_REGIME = ["btc_ret_24h", "btc_ret_7d", "btc_ret_30d", "btc_rv_7d", "breadth", "mkt_ret_24h", "dispersion"]
 DERIV_REGIME = ["mkt_funding", "mkt_oi_z"]
@@ -31,6 +31,7 @@ FEATURE_SETS = {
 }
 VOL_FEATS = ["range_24h", "adr_14d", "range_z", "rv_24h", "rv_7d"]
 LABEL_COLS = ["fwd_resid_72h", "fwd_ret_72h", "mae_72h", "mfe_72h"]
+TRAIN_COLS = LABEL_COLS + ["lrange", "lrv72"]      # 训练/评估时这些列都必须有值
 _RAW_COLS = ["ret_24h", "resid_24h_z", "ret_1h_z", "oi_chg_24h", "oi_z", "funding", "funding_z", "vol_z",
              "top_ls_z", "taker_z", "range_24h", "adr_14d", "range_z", "beta", "btc_ret_24h", "ethbtc_ret_24h"]
 
@@ -57,6 +58,13 @@ def build_table(frames: list[pd.DataFrame], th: dict | None = None, with_labels:
         r1 = lc.diff()
         g["rv_24h"] = r1.rolling(24, min_periods=20).std()
         g["rv_7d"] = r1.rolling(168, min_periods=120).std()
+        # 剔除 BTC 之后这个币自己的波动:跟 BTC 高度同步的币(ETH 等)相对 BTC 的超额波动很小,
+        # 不加这个特征,模型会按总波动把它们的大涨大跌概率高估好几倍
+        res1 = f["ret_1h"] - f["beta"] * f["btc_ret_1h"]
+        if with_labels:   # 未来 72h 已实现的"剔除 BTC 后波动":72 个小时收益平方和的平方根(比单个 |收益| 噪音小得多)
+            g["lrv72"] = np.log(np.sqrt((res1 ** 2).rolling(72).sum().shift(-72)).clip(lower=1e-4))
+        g["resid_rv_7d"] = res1.rolling(168, min_periods=120).std()
+        g["resid_rv_30d"] = res1.rolling(720, min_periods=480).std()
         b = f["_btc_lc"]
         g["btc_ret_7d"] = b.diff(168)
         g["btc_ret_30d"] = b.diff(720)
@@ -82,7 +90,7 @@ def build_table(frames: list[pd.DataFrame], th: dict | None = None, with_labels:
     num = FEATURE_SETS["full"] + ["above_sma7d"] + (["rule_score"] if hits is not None else [])
     if with_labels:
         D["lrange"] = np.log((D["mfe_72h"] - D["mae_72h"]).clip(lower=1e-4))
-        num += LABEL_COLS + ["lrange"]
+        num += TRAIN_COLS
     D[num] = D[num].astype("float32")
     return D
 
@@ -107,6 +115,19 @@ def _oof_proba(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np
     return out
 
 
+def _oof_reg(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np.ndarray:
+    """同 _oof_proba,但是回归:得到整个训练期"样本外"的预测值。"""
+    from sklearn.ensemble import HistGradientBoostingRegressor as R
+    q = np.quantile(ts, np.linspace(0, 1, nb + 1))
+    q[-1] += 1
+    out = np.full(len(X), np.nan)
+    for i in range(nb):
+        blk = ((ts >= q[i]) & (ts < q[i + 1])).to_numpy()
+        keep = ~((ts > q[i] - EMBARGO) & (ts < q[i + 1] + EMBARGO)).to_numpy()
+        out[blk] = R(**_hgb_kwargs()).fit(X[keep], y[keep]).predict(X[blk])
+    return out
+
+
 class Platt:
     """对 logit(p) 做一维逻辑回归:修正模型整体偏自信/偏高偏低。(用类而不是闭包,方便 joblib 保存)"""
 
@@ -126,14 +147,17 @@ class Platt:
 
 
 class Models:
-    """四个预测目标 + 一个"只看波动"的基线。上涨/下跌概率默认做交叉拟合校准(calib="cv")。
+    """四个预测目标 + 一个"只看波动"的基线。
 
-    校准的局限(样本外实测):上涨概率校准后误差从约 2.9pp 降到约 1.3pp;下跌概率没有任何方法能稳定改善,
-    因为"全市场当期有多少币大跌"随行情漂移、很难预测——所以绝对概率有约 ±4pp 的不确定性,
+    上涨/下跌概率有两种做法(prob 参数):
+      scale(默认) 先预测未来 72h 剔除 BTC 后的波动尺度 σ,再用"收益/σ"的历史样本外分布推出 P(收益>+T)、P(收益<-T)。
+                  波动小的币(ETH 等)概率自然小,不依赖分类树去外推,对不同币、不同波动水平更稳。
+      tree        直接用分类树预测 + 交叉拟合 Platt 校准(旧做法,留作对照)。
+    概率的局限(样本外实测):全市场"当期有多少币大跌"随行情漂移、很难预测,所以绝对概率有约 ±4pp 的不确定性,
     币与币之间的相对高低比绝对数值可靠。"""
 
-    def __init__(self, thr: float = 0.05, calib: str = "cv", feature_set: str = "full"):
-        self.thr, self.calib, self.feature_set = thr, calib, feature_set
+    def __init__(self, thr: float = 0.05, calib: str = "cv", feature_set: str = "full", prob: str = "scale"):
+        self.thr, self.calib, self.feature_set, self.prob = thr, calib, feature_set, prob
         self.feats = FEATURE_SETS[feature_set]
 
     def fit(self, tr: pd.DataFrame) -> "Models":
@@ -141,13 +165,19 @@ class Models:
         X = tr[self.feats]
         up, dn = (tr["fwd_resid_72h"] > self.thr), (tr["fwd_resid_72h"] < -self.thr)
         self.base_up, self.base_dn = float(up.mean()), float(dn.mean())
-        self.up = C(**_hgb_kwargs()).fit(X, up)
-        self.dn = C(**_hgb_kwargs()).fit(X, dn)
-        if self.calib == "cv":
-            self.cal_up = Platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))
-            self.cal_dn = Platt(_oof_proba(X, dn.to_numpy(float), tr["ts"]), dn.to_numpy(float))
+        if self.prob == "scale":
+            y = tr["lrv72"].to_numpy()
+            self.scale = R(**_hgb_kwargs()).fit(X, y)
+            z = tr["fwd_resid_72h"].to_numpy() / np.exp(_oof_reg(X, y, tr["ts"]))   # 样本外标准化收益
+            self.z_sorted = np.sort(z[np.isfinite(z)])
         else:
-            self.cal_up = self.cal_dn = Platt()
+            self.up = C(**_hgb_kwargs()).fit(X, up)
+            self.dn = C(**_hgb_kwargs()).fit(X, dn)
+            if self.calib == "cv":
+                self.cal_up = Platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))
+                self.cal_dn = Platt(_oof_proba(X, dn.to_numpy(float), tr["ts"]), dn.to_numpy(float))
+            else:
+                self.cal_up = self.cal_dn = Platt()
         self.rng = R(**_hgb_kwargs()).fit(X, tr["lrange"])
         self.mae = R(loss="quantile", quantile=0.10, **_hgb_kwargs()).fit(X, tr["mae_72h"])
         Xv = tr[VOL_FEATS]
@@ -158,9 +188,17 @@ class Models:
     def predict(self, d: pd.DataFrame) -> pd.DataFrame:
         X, Xv = d[self.feats], d[VOL_FEATS]
         out = pd.DataFrame(index=d.index)
-        raw_up, raw_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
-        out["p_up_raw"], out["p_dn_raw"] = raw_up, raw_dn
-        out["p_up"], out["p_dn"] = self.cal_up(raw_up), self.cal_dn(raw_dn)
+        if self.prob == "scale":
+            sig = np.exp(self.scale.predict(X))
+            n = len(self.z_sorted)
+            out["p_up"] = 1 - np.searchsorted(self.z_sorted, self.thr / sig, side="right") / n
+            out["p_dn"] = np.searchsorted(self.z_sorted, -self.thr / sig, side="left") / n
+            out["p_up_raw"], out["p_dn_raw"] = out["p_up"], out["p_dn"]
+            out["sigma72"] = sig
+        else:
+            raw_up, raw_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
+            out["p_up_raw"], out["p_dn_raw"] = raw_up, raw_dn
+            out["p_up"], out["p_dn"] = self.cal_up(raw_up), self.cal_dn(raw_dn)
         out["pred_lrange"] = self.rng.predict(X)
         out["pred_mae_q10"] = np.minimum(self.mae.predict(X), -1e-3)
         out["pv_up"] = self.up_v.predict_proba(Xv)[:, 1]
@@ -195,8 +233,8 @@ def score_rows(models: Models, last: pd.DataFrame, topk: int = 8, evidence: dict
     R[f"P下(<-{models.thr:.0%})"] = R["p_dn"]
     R["数据时间"] = pd.to_datetime(R["ts"], unit="ms")
     R = R.rename(columns={"ts": "t_bar"})
-    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "p_up_raw", "p_dn_raw", "pred_mae_q10"]
-                  ).reset_index(drop=True)
+    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "p_up_raw", "p_dn_raw", "pred_mae_q10", "sigma72"],
+                  errors="ignore").reset_index(drop=True)
 
 
 def save_bundle(path, models: Models, meta: dict) -> None:
@@ -210,7 +248,8 @@ def load_bundle(path) -> dict:
 
 
 # ------------------------------------------------------------------ 云端:打分、实盘记录、事后结算
-def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[dict], topk: int = 8):
+def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[dict], topk: int = 8,
+                      notable_rank: int = 15):
     """frames: {币: build_features 的输出}。返回 (写进 signals.json 的字典, 打分表)。"""
     models, meta = bundle["models"], bundle["meta"]
     fl = [f.assign(symbol=sym) for sym, f in frames.items() if len(f) >= 200]
@@ -228,6 +267,18 @@ def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[d
                       "direction": r["方向"], "direction_evidence": r["证据强度"],
                       "t_bar": int(r["t_bar"])})
     top = lambda key: [c["symbol"] for c in sorted(coins, key=lambda c: -(c[key] or 0))[:topk]]
+    # 每个币在全部币里的排名(1 = 最高),自选币有任何一项进前 notable_rank 名就单独标出来
+    names = {"vol_range": "波动", "p_up": "上涨概率", "p_dn": "下跌概率"}
+    for key in names:
+        for i, c in enumerate(sorted(coins, key=lambda c: -(c[key] or 0)), 1):
+            c["rank_" + key] = i
+    cut = min(notable_rank, max(1, len(coins) // 5))
+    highlights = []
+    for c in coins:
+        if c["watch"]:
+            why = [f"{n}第{c['rank_' + k]}位" for k, n in names.items() if c["rank_" + k] <= cut]
+            if why:
+                highlights.append({"symbol": c["symbol"], "reasons": why})
     block = {
         "model": {"feature_set": meta.get("feature_set"), "trained_through": meta.get("trained_through"),
                   "horizon_h": H, "threshold": models.thr,
@@ -246,6 +297,7 @@ def cloud_opportunity(bundle: dict, frames: dict[str, pd.DataFrame], uni: list[d
         "coins": coins,
         "top_vol": top("vol_range"), "top_p_up": top("p_up"), "top_p_dn": top("p_dn"),
         "watchlist": [c["symbol"] for c in coins if c["watch"]],
+        "watch_highlights": highlights, "n_coins": len(coins),
     }
     return block, R
 

@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from cryptoradar.config import load_config
-from cryptoradar.opportunity import (EMBARGO, FEATURE_SETS, H, HOUR, LABEL_COLS, VOL_FEATS, Models, build_table,
+from cryptoradar.opportunity import (EMBARGO, FEATURE_SETS, H, HOUR, LABEL_COLS, TRAIN_COLS, VOL_FEATS, Models, build_table,
                                      latest_rows, load_bundle, save_bundle, score_rows)
 from cryptoradar.signals import merged_thresholds
 from cryptoradar.storage import Store
@@ -168,8 +168,8 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
 
 
 def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: int, cost: float,
-             calib: str = "cv", feature_set: str = "full") -> dict:
-    lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
+             calib: str = "cv", feature_set: str = "full", prob: str = "scale") -> dict:
+    lab = D[TRAIN_COLS].notna().all(axis=1)
     L = D[lab]
     ts_all = D["ts"].to_numpy()
     qs = [first_train + (1 - first_train) * i / folds for i in range(folds)] + [1.0]
@@ -181,7 +181,7 @@ def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: 
         tr = L[(L["ts"] < lo - EMBARGO) & (L["h"] % 6 == 0)]
         te = L[(L["ts"] >= lo) & (L["ts"] < hi)]
         log.info("第 %d/%d 轮:训练 %d 行,检验 %d 行", k + 1, folds, len(tr), len(te))
-        m = Models(thr, calib, feature_set).fit(tr)
+        m = Models(thr, calib, feature_set, prob).fit(tr)
         r = evaluate_fold(m, te, topk, cost, thr)
         r["fold"] = k + 1
         r["window"] = (pd.to_datetime(lo, unit="ms").date(), pd.to_datetime(hi, unit="ms").date())
@@ -218,10 +218,11 @@ def pool(res: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 当前排名
-def rank_now(D: pd.DataFrame, thr: float, topk: int = 8, evidence: dict | None = None, feature_set: str = "full"):
+def rank_now(D: pd.DataFrame, thr: float, topk: int = 8, evidence: dict | None = None, feature_set: str = "full",
+             prob: str = "scale"):
     """用全部有标签的历史训练,对每个币最新一行打分,给出方向档位(按截面排名)与该档位的历史实绩。"""
-    lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
-    m = Models(thr, "cv", feature_set).fit(D[lab & (D["h"] % 6 == 0)])
+    lab = D[TRAIN_COLS].notna().all(axis=1)
+    m = Models(thr, "cv", feature_set, prob).fit(D[lab & (D["h"] % 6 == 0)])
     return score_rows(m, latest_rows(D), topk, evidence), m
 
 
@@ -319,7 +320,7 @@ def main() -> None:
     ev = direction_evidence(Pw)
     latest, models = rank_now(D, args.threshold, args.topk, ev, fs)
     if args.export:
-        lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
+        lab = D[TRAIN_COLS].notna().all(axis=1)
         ic = Pw["ic"]
         meta = {"feature_set": fs, "threshold": args.threshold, "topk": args.topk,
                 "trained_through": str(pd.to_datetime(D.loc[lab, "ts"].max(), unit="ms")),
