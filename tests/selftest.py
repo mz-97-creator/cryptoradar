@@ -97,6 +97,20 @@ def main() -> None:
         check(hit >= 0.8 * len(market.events), f"埋入的 {len(market.events)} 次事件识别出 {hit} 次,且都在事件发生之前")
         check(div.resid72_mean > base.resid72_mean + 0.03, "信号后的 72h 收益明显高于基准")
 
+        print("\n[5] 调参与评分模型的滚动检验(tune.py):流程跑通,且训练期始终早于检验期")
+        import numpy as np
+        import tune
+        pool = tune.load_frames(store, th, ["OPUSDT", "SOLUSDT", "ARBUSDT"])
+        tune.GRID = {"oi_z": [2.0, 3.0], "resid_z": [2.5], "funding_z": [2.5], "min_score": [1.5, 2.5]}
+        per_fold, total, chosen, model = tune.run_tune(pool, th, folds=2, top_pct=5.0, min_n=3)
+        print(tune.fmt(total).to_string(index=False))
+        check(set(total["方法"]) == {"基准", "当前规则", "调参规则", "评分模型"}, "四种方法都有结果")
+        check(len(per_fold) == 8 and len(chosen) == 2, "每轮每种方法各一行")
+        check(all(np.isfinite(v) for v in model.coefs().values()), "模型系数有限")
+        tune.write_report(tmp / "reports", per_fold, total, chosen, model,
+                          type("A", (), {"folds": 2, "top_pct": 5.0})())
+        check((tmp / "reports" / "tune_report.md").exists(), "报告已生成")
+
         print("\n全部通过 ✅")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
