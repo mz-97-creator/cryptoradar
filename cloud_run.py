@@ -205,6 +205,40 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                                    "text": f"{sym} 现价 {p:.6g} 已{word} {level:g}:{pa.get('note', '')}"})
             pa_state[key] = bool(hit)
 
+    # 资金费率提醒(8h 口径;越过阈值触发一次,回到阈值内后重新生效,同一阈值受冷却期限制)
+    funds = {u["ccy"]: _num(row.get("funding")) for u, row, _ in results}
+    fa_state = dict(prev_state.get("funding_alerts", {}))
+    fund_levels = []
+    for fa in cfg.get("funding_alerts") or []:
+        sym = str(fa.get("symbol", "")).upper().replace("USDT", "").replace("-SWAP", "").strip("-")
+        r = funds.get(sym)
+        if r is None:
+            continue
+        pos = float(fa.get("position_usdt") or 0)
+        daily = r * 3 * pos if pos else None  # 正数 = 多头付出
+        for side in ("above", "below"):
+            if side not in fa:
+                continue
+            level = float(fa[side])
+            hit = r >= level if side == "above" else r <= level
+            key = f"{sym}|{side}|{level}"
+            fund_levels.append({"symbol": sym, "side": side, "level": level, "funding": r, "hit": hit,
+                                "position_usdt": pos or None, "daily_cost": daily, "note": fa.get("note", "")})
+            cool_key = f"{sym}|FUNDALERT|{side}|{level}"
+            if hit and not fa_state.get(key, False) and now - int(last_fire.get(cool_key, 0)) > cooldown:
+                word = "升至" if side == "above" else "降至"
+                text = f"{sym} 资金费率{word} {r * 100:.4f}%/8h(阈值 {level * 100:.3f}%)"
+                if daily is not None:
+                    text += (f",按 {pos:,.0f} USDT 多仓每天约付 {daily:.2f} USDT" if daily >= 0
+                             else f",按 {pos:,.0f} USDT 多仓每天约收 {-daily:.2f} USDT")
+                if fa.get("note"):
+                    text += f":{fa['note']}"
+                new_events.append({"id": f"{now}-fund-{key}", "ts": now, "type": "funding", "symbol": sym,
+                                   "funding": r, "level": level, "side": side, "daily_cost": daily,
+                                   "text": text})
+                last_fire[cool_key] = now
+            fa_state[key] = bool(hit)
+
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
     market = {}
     if btc_row is not None:
@@ -229,12 +263,13 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz) -> tuple[d
                         "resid_24h_z": _num(row["resid_24h_z"]), "oi_z": _num(row.get("oi_z")),
                         "funding": _num(row.get("funding"))} for u, row in movers],
         "price_levels": levels,
+        "funding_levels": fund_levels,
         "new_events": len(new_events),
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
     state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after},
-             "price_alerts": pa_state, "universe": uni_cache}
+             "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache}
     return signals, events, state
 
 
@@ -247,6 +282,18 @@ def status_md(sig: dict, events: list) -> str:
         lines.append(f"BTC ${m['btc_price']:,.0f} (24h {m['btc_ret_24h'] * 100:+.1f}%) · "
                      f"扫描 {sig.get('scanned')} 个合约 · 用时 {sig.get('runtime_sec')} 秒")
     lines += ["", "## 自选"] + [w["text"] + "\n" for w in sig.get("watchlist", [])]
+    seen = set()
+    for fl in sig.get("funding_levels", []):
+        if fl["symbol"] in seen:
+            continue
+        seen.add(fl["symbol"])
+        s = f"- {fl['symbol']} 资金费率 {fl['funding'] * 100:.4f}%/8h"
+        if fl.get("daily_cost") is not None:
+            d = fl["daily_cost"]
+            s += f" · {fl['position_usdt']:,.0f} USDT 多仓每天{'付' if d >= 0 else '收'} {abs(d):.2f} USDT"
+        lines.append(s)
+    if seen:
+        lines.append("")
     lines += ["## 正在触发"] + [f["text"] + "\n" for f in sig.get("firing", [])[:20]]
     lines += ["## 最近 24 小时新事件"]
     cut = sig.get("generated_at", 0) - 24 * HOUR_MS

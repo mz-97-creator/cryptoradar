@@ -27,4 +27,21 @@ price_alerts:
     below: 0.095
     note: "关键支撑"
 
+# 资金费率提醒(8h 口径,小数:0.0003 = 0.03%)。越过阈值时生成一次事件,回到阈值内后重新生效。
+# position_usdt 是你的仓位名义价值(保证金 × 杠杆),用来估算每天的资金费;不填就只报费率。
+# 这里只管持仓成本;"费率异常"作为信号仍由上面的 funding_z / funding_abs 规则负责。
+funding_alerts:
+  - symbol: OP
+    above: 0.0003          # 基准的 3 倍:多头开始拥挤,持仓成本明显上升
+    position_usdt: 3138    # 按 1046 保证金 × 3 倍估算,仓位变了就改这里
+    note: "多头拥挤,持仓成本上升"
+  - symbol: OP
+    above: 0.001           # 0.1%/8h:极端拥挤,警惕多头踩踏
+    position_usdt: 3138
+    note: "极端拥挤,考虑降杠杆"
+  - symbol: OP
+    below: 0.0             # 转负:空头付钱给多头,空头拥挤
+    position_usdt: 3138
+    note: "空头拥挤,多头持仓反而收钱"
+
 display_timezone: Asia/Singapore

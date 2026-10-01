@@ -76,7 +76,9 @@ def main():
     universe.fetch_coingecko_top = fake_coingecko
     cloud_run.fetch_coingecko_top = fake_coingecko
     cfg = _merge(DEFAULTS, {"universe": {"top_n": 150, "watchlist": ["OP"]},
-                            "price_alerts": [{"symbol": "OP", "below": 1.0, "note": "测试"}]})
+                            "price_alerts": [{"symbol": "OP", "below": 1.0, "note": "测试"}],
+                            "funding_alerts": [{"symbol": "OP", "above": -1.0, "position_usdt": 3000},
+                                               {"symbol": "OP", "below": -1.0}]})
     tz = ZoneInfo("Asia/Singapore")
     m = Market(hours=1000)
 
@@ -86,6 +88,9 @@ def main():
     check(sig["scanned"] >= 6, f"扫描 {sig['scanned']} 个合约")
     check("OI_DIV" in syms.get("OP", {}).get("rules", []), f"OP 产生 OI 背离事件:{syms.get('OP', {}).get('rules')}")
     check(any(e["type"] == "price" for e in events), "价位提醒事件生成")
+    fe = [e for e in events if e["type"] == "funding"]
+    check(len(fe) == 1 and fe[0]["daily_cost"] is not None, f"资金费率提醒事件生成:{fe[0]['text'] if fe else None}")
+    check(len(sig["funding_levels"]) == 2, "资金费率阈值写入快照")
     check(sig["watchlist"] and sig["watchlist"][0]["symbol"] == "OP", "自选 OP 在快照里")
     check("USDC" not in {f["symbol"] for f in sig["firing"]}, "稳定币已排除")
     print("\n" + sig["watchlist"][0]["text"] + "\n")
@@ -112,6 +117,7 @@ def main():
         check(s3.get("consecutive_errors") == 1, "连续错误计数")
         check(len(e3) == len(events2), "出错时事件和状态原样保留")
         check((tmp / "out" / "status.md").exists(), "status.md 已生成")
+        check("资金费率" in cloud_run.status_md(sig2, events2), "status.md 显示资金费率和每日成本")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\n全部通过 ✅")

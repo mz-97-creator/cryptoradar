@@ -23,6 +23,7 @@ DEFAULTS = {
         "thresholds": {},
     },
     "price_alerts": [],
+    "funding_alerts": [],
     "notify": {
         "channel": "console",
         "pushplus_token": "",
