@@ -101,11 +101,37 @@ def _hgb_kwargs():
                 min_samples_leaf=500, random_state=0)
 
 
-class Models:
-    """四个预测目标 + 一个"只看波动"的基线。"""
+def _oof_proba(X: pd.DataFrame, y: np.ndarray, ts: pd.Series, nb: int = 5) -> np.ndarray:
+    """时间块交叉拟合:把训练期按时间切成 nb 块,每块用其余块(两侧各留 72h)训练、预测本块,
+    得到整个训练期的"样本外"概率,用来衡量模型平均偏自信多少。"""
+    from sklearn.ensemble import HistGradientBoostingClassifier as C
+    q = np.quantile(ts, np.linspace(0, 1, nb + 1))
+    q[-1] += 1
+    out = np.full(len(X), np.nan)
+    for i in range(nb):
+        blk = ((ts >= q[i]) & (ts < q[i + 1])).to_numpy()
+        keep = ~((ts > q[i] - EMBARGO) & (ts < q[i + 1] + EMBARGO)).to_numpy()
+        out[blk] = C(**_hgb_kwargs()).fit(X[keep], y[keep]).predict_proba(X[blk])[:, 1]
+    return out
 
-    def __init__(self, thr: float):
-        self.thr = thr
+
+def _platt(p_raw: np.ndarray, y: np.ndarray):
+    """对 logit(p) 做一维逻辑回归:修正模型整体偏自信/偏高偏低。"""
+    from sklearn.linear_model import LogisticRegression
+    z = lambda p: np.log(np.clip(p, 1e-4, 1 - 1e-4) / (1 - np.clip(p, 1e-4, 1 - 1e-4))).reshape(-1, 1)
+    lr = LogisticRegression(C=1e3).fit(z(p_raw), y)
+    return lambda p: lr.predict_proba(z(p))[:, 1]
+
+
+class Models:
+    """四个预测目标 + 一个"只看波动"的基线。上涨/下跌概率默认做交叉拟合校准(calib="cv")。
+
+    校准的局限(样本外实测):上涨概率校准后误差从约 2.9pp 降到约 1.3pp;下跌概率没有任何方法能稳定改善,
+    因为"全市场当期有多少币大跌"随行情漂移、很难预测——所以绝对概率有约 ±4pp 的不确定性,
+    币与币之间的相对高低比绝对数值可靠。"""
+
+    def __init__(self, thr: float, calib: str = "cv"):
+        self.thr, self.calib = thr, calib
 
     def fit(self, tr: pd.DataFrame) -> "Models":
         from sklearn.ensemble import HistGradientBoostingClassifier as C, HistGradientBoostingRegressor as R
@@ -114,6 +140,11 @@ class Models:
         self.base_up, self.base_dn = float(up.mean()), float(dn.mean())
         self.up = C(**_hgb_kwargs()).fit(X, up)
         self.dn = C(**_hgb_kwargs()).fit(X, dn)
+        if self.calib == "cv":
+            self.cal_up = _platt(_oof_proba(X, up.to_numpy(float), tr["ts"]), up.to_numpy(float))
+            self.cal_dn = _platt(_oof_proba(X, dn.to_numpy(float), tr["ts"]), dn.to_numpy(float))
+        else:
+            self.cal_up = self.cal_dn = lambda p: p
         self.rng = R(**_hgb_kwargs()).fit(X, tr["lrange"])
         self.mae = R(loss="quantile", quantile=0.10, **_hgb_kwargs()).fit(X, tr["mae_72h"])
         Xv = tr[VOL_FEATS]
@@ -124,8 +155,9 @@ class Models:
     def predict(self, d: pd.DataFrame) -> pd.DataFrame:
         X, Xv = d[FEATS], d[VOL_FEATS]
         out = pd.DataFrame(index=d.index)
-        out["p_up"] = self.up.predict_proba(X)[:, 1]
-        out["p_dn"] = self.dn.predict_proba(X)[:, 1]
+        raw_up, raw_dn = self.up.predict_proba(X)[:, 1], self.dn.predict_proba(X)[:, 1]
+        out["p_up_raw"], out["p_dn_raw"] = raw_up, raw_dn
+        out["p_up"], out["p_dn"] = self.cal_up(raw_up), self.cal_dn(raw_dn)
         out["pred_lrange"] = self.rng.predict(X)
         out["pred_mae_q10"] = np.minimum(self.mae.predict(X), -1e-3)
         out["pv_up"] = self.up_v.predict_proba(Xv)[:, 1]
@@ -161,6 +193,12 @@ def _topk(T: pd.DataFrame, score: str, k: int, target: str, ascending: bool = Fa
 
 def _brier(p: np.ndarray, y: np.ndarray) -> float:
     return float(np.mean((p - y) ** 2))
+
+
+def ece(p: np.ndarray, y: np.ndarray, bins: int = 10) -> float:
+    """平均校准误差:各分位档里 |预测均值 - 实际频率| 按样本数加权。0 = 完全校准。"""
+    t = calib_table(p, y, bins)
+    return float((t["n"] * (t["预测均值"] - t["实际频率"]).abs()).sum() / t["n"].sum())
 
 
 def calib_table(p: np.ndarray, y: np.ndarray, bins: int = 10) -> pd.DataFrame:
@@ -213,6 +251,18 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
                   "做空后k 净": -short_["fwd_resid_72h"].mean() - cost + fund_s,
                   "全体均值": CS["fwd_resid_72h"].mean(), "n多": len(long_), "n空": len(short_)}
 
+    # 方向档位:按 P上-P下 取前 k("偏涨")/后 k("偏跌"),看真实结果;价差序列用于算 t
+    tiers, spread = [], {}
+    allm = CS.groupby("ts")["fwd_resid_72h"].transform("mean")
+    for name, asc in [("偏涨(P上-P下 最高 k 个)", False), ("偏跌(P上-P下 最低 k 个)", True)]:
+        sub = _topk(CS, "dir", topk, "fwd_resid_72h", asc)
+        tiers.append({"档位": name, "n": len(sub), "涨>阈值 实际比例": sub["up"].mean(), "跌<-阈值 实际比例": sub["dn"].mean(),
+                      "72h超额均值": sub["fwd_resid_72h"].mean(), "72h超额>0 比例": (sub["fwd_resid_72h"] > 0).mean()})
+        spread[name] = (sub["fwd_resid_72h"] - allm.loc[sub.index]).groupby(sub["ts"]).mean()
+    tiers.append({"档位": "全体", "n": len(CS), "涨>阈值 实际比例": CS["up"].mean(), "跌<-阈值 实际比例": CS["dn"].mean(),
+                  "72h超额均值": CS["fwd_resid_72h"].mean(), "72h超额>0 比例": (CS["fwd_resid_72h"] > 0).mean()})
+    res["tiers"], res["spread"] = pd.DataFrame(tiers), spread
+
     # 校准与 Brier(用全部检验行,每 3 小时取一个)
     S = T.iloc[::3]
     res["brier"] = {}
@@ -220,8 +270,11 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
     for key, pm, pv, y in [("上涨", "p_up", "pv_up", "up"), ("下跌", "p_dn", "pv_dn", "dn")]:
         base = models.base_up if key == "上涨" else models.base_dn
         bm, bv, bc = _brier(S[pm], S[y]), _brier(S[pv], S[y]), _brier(np.full(len(S), base), S[y])
+        raw = S["p_up_raw"] if key == "上涨" else S["p_dn_raw"]
         res["brier"][key] = {"Brier(模型)": bm, "Brier(只看波动)": bv, "Brier(历史平均)": bc,
-                             "技能分 vs 历史平均": 1 - bm / bc, "技能分 vs 只看波动": 1 - bm / bv}
+                             "技能分 vs 历史平均": 1 - bm / bc, "技能分 vs 只看波动": 1 - bm / bv,
+                             "校准误差ECE": ece(S[pm].to_numpy(), S[y].to_numpy()),
+                             "ECE(校准前)": ece(raw.to_numpy(), S[y].to_numpy())}
         res["calib"][key] = calib_table(S[pm].to_numpy(), S[y].to_numpy())
 
     # 回撤 q10:覆盖率(实际比预测更差的比例,理想 10%),按预测风险分 5 档
@@ -240,7 +293,8 @@ def evaluate_fold(models: Models, te: pd.DataFrame, topk: int, cost: float, thr:
     return res
 
 
-def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: int, cost: float) -> dict:
+def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: int, cost: float,
+             calib: str = "cv") -> dict:
     lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
     L = D[lab]
     ts_all = D["ts"].to_numpy()
@@ -253,7 +307,7 @@ def run_eval(D: pd.DataFrame, folds: int, first_train: float, thr: float, topk: 
         tr = L[(L["ts"] < lo - EMBARGO) & (L["h"] % 6 == 0)]
         te = L[(L["ts"] >= lo) & (L["ts"] < hi)]
         log.info("第 %d/%d 轮:训练 %d 行,检验 %d 行", k + 1, folds, len(tr), len(te))
-        m = Models(thr).fit(tr)
+        m = Models(thr, calib).fit(tr)
         r = evaluate_fold(m, te, topk, cost, thr)
         r["fold"] = k + 1
         r["window"] = (pd.to_datetime(lo, unit="ms").date(), pd.to_datetime(hi, unit="ms").date())
@@ -277,13 +331,21 @@ def pool(res: dict) -> dict:
                              "实际频率": np.average(q["实际频率"], weights=q["n"]), "n": q["n"].sum()}))
         for key in ("上涨", "下跌")}
     mae_cov = pd.concat([x["mae_cov"] for x in f]).groupby(level=0).mean()
-    return {"ic": ic_tab, "top": top, "brier": brier, "pnl": pnl, "regime": reg, "calib": calib,
+    tiers = pd.concat([x["tiers"] for x in f]).groupby("档位", sort=False).apply(
+        lambda q: pd.Series({"n": q["n"].sum(), **{c: np.average(q[c], weights=q["n"]) for c in q.columns if c not in ("档位", "n")}}),
+        include_groups=False)
+    sp = {}
+    for nm in f[0]["spread"]:
+        sr = pd.concat([x["spread"][nm] for x in f])
+        sp[nm] = {"截面数": len(sr), "相对全体 72h超额(均值)": sr.mean(),
+                  "t": sr.mean() / (sr.std() / np.sqrt(len(sr))) if len(sr) > 2 and sr.std() > 0 else np.nan}
+    return {"tiers": tiers, "tier_t": pd.DataFrame(sp).T, "ic": ic_tab, "top": top, "brier": brier, "pnl": pnl, "regime": reg, "calib": calib,
             "mae_cov": mae_cov, "mae_cov_all": float(np.mean([x["mae_cov_all"] for x in f]))}
 
 
 # ------------------------------------------------------------------ 当前排名
-def rank_now(D: pd.DataFrame, thr: float, top: int = 10) -> pd.DataFrame:
-    """用全部有标签的历史训练,对每个币最新一行打分。"""
+def rank_now(D: pd.DataFrame, thr: float, topk: int = 8, evidence: dict | None = None):
+    """用全部有标签的历史训练,对每个币最新一行打分,给出方向档位(按截面排名)与该档位的历史实绩。"""
     lab = D[LABEL_COLS + ["lrange"]].notna().all(axis=1)
     tr = D[lab & (D["h"] % 6 == 0)]
     m = Models(thr).fit(tr)
@@ -293,10 +355,33 @@ def rank_now(D: pd.DataFrame, thr: float, top: int = 10) -> pd.DataFrame:
     R = last[["symbol", "ts", "close"]].join(P)
     R["预测波动幅度"] = np.exp(R["pred_lrange"])
     R["可承受杠杆(90%)"] = 1 / R["pred_mae_q10"].abs()
+    R["方向分(P上-P下)"] = R["p_up"] - R["p_dn"]
+    rk = R["方向分(P上-P下)"].rank(method="first", ascending=False)
+    R["方向"] = np.where(rk <= topk, "偏涨", np.where(rk > len(R) - topk, "偏跌", "中性"))
+    ev = evidence or {}
+    R["该档位历史:涨>阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("涨"))
+    R["该档位历史:跌<-阈值比例"] = R["方向"].map(lambda d: ev.get(d, {}).get("跌"))
+    R["该档位历史:72h超额均值"] = R["方向"].map(lambda d: ev.get(d, {}).get("超额"))
+    R["证据强度"] = R["方向"].map(lambda d: ev.get(d, {}).get("强度", ""))
     R["P上(>+{:.0%})".format(thr)] = R["p_up"]
     R["P下(<-{:.0%})".format(thr)] = R["p_dn"]
     R["数据时间"] = pd.to_datetime(R["ts"], unit="ms")
-    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "ts"]).reset_index(drop=True), m
+    return R.drop(columns=["pv_up", "pv_dn", "pred_lrange", "ts", "p_up", "p_dn", "p_up_raw", "p_dn_raw"]).reset_index(drop=True), m
+
+
+def direction_evidence(P: dict) -> dict:
+    """把样本外的方向档位实绩整理成 {偏涨/偏跌/中性: {...}};强度按 t 值分档:|t|<2 弱,2~3 中,≥3 较强。"""
+    t, tt = P["tiers"], P["tier_t"]
+    out = {}
+    for key, nm in [("偏涨", "偏涨(P上-P下 最高 k 个)"), ("偏跌", "偏跌(P上-P下 最低 k 个)")]:
+        tv = tt.loc[nm, "t"]
+        sign_ok = (tt.loc[nm, "相对全体 72h超额(均值)"] > 0) == (key == "偏涨")
+        strength = "弱" if (abs(tv) < 2 or not sign_ok) else ("中" if abs(tv) < 3 else "较强")
+        out[key] = {"涨": float(t.loc[nm, "涨>阈值 实际比例"]), "跌": float(t.loc[nm, "跌<-阈值 实际比例"]),
+                    "超额": float(t.loc[nm, "72h超额均值"]), "强度": f"{strength}(t={tv:+.1f})"}
+    out["中性"] = {"涨": float(t.loc["全体", "涨>阈值 实际比例"]), "跌": float(t.loc["全体", "跌<-阈值 实际比例"]),
+                 "超额": float(t.loc["全体", "72h超额均值"]), "强度": "—"}
+    return out
 
 
 # ------------------------------------------------------------------ 报告
@@ -328,6 +413,9 @@ def section(tag: str, res: dict, P: dict, args) -> list[str]:
     md += [f"### 5. 扣成本后的组合(每 72h 一期,k={args.topk},成本 {args.cost:.2%}/期 + 资金费率)\n",
            _t(P["pnl"].to_frame("均值").T, ["做多前k 毛", "做多前k 净", "做空后k 毛", "做空后k 净", "全体均值"]), "\n"]
     md += ["### 6. 按大盘风格拆分的方向 IC\n", _t(pd.DataFrame(P["regime"]).T), "\n"]
+    md += ["### 7. 方向档位的历史实绩(推送里「偏涨/偏跌」标签对应的真实表现)\n",
+           _t(P["tiers"], ["72h超额均值", "涨>阈值 实际比例", "跌<-阈值 实际比例", "72h超额>0 比例"]), "\n",
+           "相对全体的 72h 超额价差与 t 值(按截面算;|t|<2 视为证据弱):\n", _t(P["tier_t"], ["相对全体 72h超额(均值)"]), "\n"]
     return md
 
 
@@ -367,7 +455,7 @@ def main() -> None:
     wf = run_eval(D, args.folds, 0.4, args.threshold, args.topk, args.cost)
     sp = run_eval(D, 1, 0.7, args.threshold, args.topk, args.cost)
     Pw, Ps = pool(wf), pool(sp)
-    latest, _ = rank_now(D, args.threshold)
+    latest, _ = rank_now(D, args.threshold, args.topk, direction_evidence(Pw))
     path = write_report(Path(cfg["_base_dir"]) / "reports", wf, sp, Pw, Ps, latest, args)
     pd.set_option("display.width", 250)
     print("\n== 滚动检验:IC ==\n", Pw["ic"].to_string())

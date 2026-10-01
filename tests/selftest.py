@@ -135,8 +135,11 @@ def main() -> None:
             T = x["T"]
             check(T["p_up"].between(0, 1).all() and T["p_dn"].between(0, 1).all(), "概率在 0~1 之间")
             check((T["pred_mae_q10"] < 0).all(), "回撤 q10 为负数")
-        latest, _ = model.rank_now(D, 0.05)
+        ev = model.direction_evidence(P)
+        check(set(ev) == {"偏涨", "偏跌", "中性"} and all("强度" in v for v in ev.values()), "方向档位含历史实绩与证据强度")
+        latest, _ = model.rank_now(D, 0.05, 1, ev)
         check(len(latest) == 3 and latest["可承受杠杆(90%)"].gt(0).all(), "当前排名每个币一行")
+        check({"偏涨", "偏跌"} <= set(latest["方向"]) and latest["证据强度"].astype(str).str.len().gt(0).all(), "每个币有方向档位和证据强度")
 
         print("\n全部通过 ✅")
     finally:
