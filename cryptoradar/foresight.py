@@ -238,7 +238,8 @@ def _past_pct(s: pd.Series, window: int = 720, min_periods: int = 168) -> pd.Ser
         past = past[~np.isnan(past)]
         if len(past) < min_periods or np.isnan(x[-1]):
             return np.nan
-        return float((past <= x[-1]).mean())
+        # 中位秩:并列的值算一半,避免费率长期停在 0.01% 时被误判为"100% 分位"
+        return float((past < x[-1]).mean() + 0.5 * (past == x[-1]).mean())
     return s.rolling(window + 1, min_periods=min_periods + 1).apply(f, raw=True)
 
 
