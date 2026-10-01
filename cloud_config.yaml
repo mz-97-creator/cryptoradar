@@ -2,7 +2,7 @@
 
 universe:
   top_n: 150            # CoinGecko 市值前 N 名,再与 OKX USDT 永续取交集
-  watchlist: [OP, HYPE, ETH, AAVE, ARB, PUMP]   # 自选:推送门槛更低,每次单独列出;ARB 作为 OP 的同类对照
+  watchlist: [OP, HYPE, ETH, AAVE, ARB, PUMP, SOL, XRP, FIL, STX]   # 自选:推送门槛更低,每次单独列出;ARB 作为 OP 的同类对照
   exclude: []
 
 signals:
