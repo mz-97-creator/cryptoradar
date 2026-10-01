@@ -1,0 +1,162 @@
+{
+ "made_at": "2026-10-01T15:27:53.150253+00:00",
+ "t_bar": 3.0,
+ "rules": {
+  "OI_DIV": {
+   "rule": "OI_DIV",
+   "n_events": 2569,
+   "n_days": 823,
+   "excess_mean": -0.000952583624339623,
+   "t": -0.5446854799863414,
+   "t_raw_vs_btc": -0.9434309891369644,
+   "first_half": -0.001921245563836835,
+   "second_half": 0.00024508263237568083,
+   "validated": false,
+   "direction": "down"
+  },
+  "OI_TREND": {
+   "rule": "OI_TREND",
+   "n_events": 2322,
+   "n_days": 786,
+   "excess_mean": 0.007703873804190584,
+   "t": 2.403174102487343,
+   "t_raw_vs_btc": 0.72904756002579,
+   "first_half": 0.006822486185663374,
+   "second_half": 0.008763020270151856,
+   "validated": false,
+   "direction": "up"
+  },
+  "OI_FLUSH": {
+   "rule": "OI_FLUSH",
+   "n_events": 2667,
+   "n_days": 712,
+   "excess_mean": 0.0021925872915705604,
+   "t": 0.9316269205887351,
+   "t_raw_vs_btc": 0.8757434150621727,
+   "first_half": 0.0011820396972274483,
+   "second_half": 0.0035439328934359256,
+   "validated": false,
+   "direction": "up"
+  },
+  "SHORT_COVER": {
+   "rule": "SHORT_COVER",
+   "n_events": 1865,
+   "n_days": 637,
+   "excess_mean": 0.002942497009010946,
+   "t": 1.231968429366214,
+   "t_raw_vs_btc": 0.5377675515910862,
+   "first_half": 0.003809814741305805,
+   "second_half": 0.002050319851268147,
+   "validated": false,
+   "direction": "up"
+  },
+  "FUND_HOT": {
+   "rule": "FUND_HOT",
+   "n_events": 829,
+   "n_days": 250,
+   "excess_mean": 0.0037004814311612576,
+   "t": 0.4410385458787602,
+   "t_raw_vs_btc": 0.2109615442631655,
+   "first_half": -0.005797781290512512,
+   "second_half": 0.011534814916921378,
+   "validated": false,
+   "direction": "up"
+  },
+  "FUND_COLD": {
+   "rule": "FUND_COLD",
+   "n_events": 3659,
+   "n_days": 802,
+   "excess_mean": 0.0016054856041034073,
+   "t": 0.7211184987917589,
+   "t_raw_vs_btc": -0.3011218778603237,
+   "first_half": 0.0011012816474713642,
+   "second_half": 0.002107181083339271,
+   "validated": false,
+   "direction": "up"
+  },
+  "RESID": {
+   "rule": "RESID",
+   "n_events": 4311,
+   "n_days": 837,
+   "excess_mean": 0.0008802845248489295,
+   "t": 0.3983131002505894,
+   "t_raw_vs_btc": -0.43647118928132767,
+   "first_half": 0.001120832921447209,
+   "second_half": 0.0006281795745893442,
+   "validated": false,
+   "direction": "up"
+  },
+  "SHOCK": {
+   "rule": "SHOCK",
+   "n_events": 6351,
+   "n_days": 823,
+   "excess_mean": 0.0006511757119038282,
+   "t": 0.2960699004795069,
+   "t_raw_vs_btc": -0.13440365307085717,
+   "first_half": -0.0006877683179362957,
+   "second_half": 0.0021161780855202487,
+   "validated": false,
+   "direction": "up"
+  },
+  "VOL": {
+   "rule": "VOL",
+   "n_events": 1522,
+   "n_days": 545,
+   "excess_mean": 0.0076079803282400014,
+   "t": 1.5174706443943475,
+   "t_raw_vs_btc": 1.1003783217895584,
+   "first_half": 0.01091774220271248,
+   "second_half": 0.004212090821346308,
+   "validated": false,
+   "direction": "up"
+  },
+  "LONG_CROWD": {
+   "rule": "LONG_CROWD",
+   "n_events": 443,
+   "n_days": 166,
+   "excess_mean": 0.003165627373535424,
+   "t": 0.32321782465122073,
+   "t_raw_vs_btc": 0.23717361601979453,
+   "first_half": 0.004992842637134418,
+   "second_half": 0.001248179257413023,
+   "validated": false,
+   "direction": "up"
+  },
+  "SHORT_CROWD": {
+   "rule": "SHORT_CROWD",
+   "n_events": 2187,
+   "n_days": 744,
+   "excess_mean": 0.005149884807297919,
+   "t": 2.299038654189599,
+   "t_raw_vs_btc": 1.1732769759492747,
+   "first_half": -0.0005630291248100402,
+   "second_half": 0.01052874033223628,
+   "validated": false,
+   "direction": "up"
+  },
+  "COIL": {
+   "rule": "COIL",
+   "n_events": 2395,
+   "n_days": 684,
+   "excess_mean": -0.0009967647414764376,
+   "t": -0.5948035641254174,
+   "t_raw_vs_btc": -2.296548645194145,
+   "first_half": 0.00012060201208036758,
+   "second_half": -0.0023689056733686704,
+   "validated": false,
+   "direction": "down"
+  },
+  "LS_EXT": {
+   "rule": "LS_EXT",
+   "n_events": 3099,
+   "n_days": 839,
+   "excess_mean": 0.0022480859517541025,
+   "t": 1.3283151433475302,
+   "t_raw_vs_btc": 0.3014139528312484,
+   "first_half": 0.002378367513928514,
+   "second_half": 0.0020988119367818863,
+   "validated": false,
+   "direction": "up"
+  }
+ }
+}

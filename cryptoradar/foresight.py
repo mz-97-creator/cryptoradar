@@ -161,14 +161,36 @@ def base_rates(labeled: dict[str, pd.DataFrame], watch: list[str], min_n: int = 
             "span_days": round((t_max - t_min) / 86_400_000, 1) if t_min is not None else 0}
 
 
-def call_from(stats: dict | None, baseline: dict | None) -> str:
-    """有足够样本且明显偏离基准时,给出方向:up / down;否则 none。"""
-    if not stats or not baseline or stats["n"] < MIN_N_CALL:
+_VALIDATED: dict | None = None
+
+
+def validated_rules() -> dict[str, str]:
+    """通过长期验证(rule_validation.py:扣掉全市场共同因子、按日聚合、|t|≥3 且前后半段同向)的规则 → 方向。
+    文件缺失或没有规则通过时为空,此时任何规则都不会给出偏涨/偏跌。"""
+    global _VALIDATED
+    if _VALIDATED is None:
+        try:
+            d = json.loads((Path(__file__).resolve().parent.parent / "models" / "rule_validation.json").read_text(encoding="utf-8"))
+            _VALIDATED = {k: v["direction"] for k, v in d.get("rules", {}).items() if v.get("validated")}
+        except Exception:
+            _VALIDATED = {}
+    return _VALIDATED
+
+
+def call_from(stats: dict | None, baseline: dict | None, cid: str | None = None) -> str:
+    """方向判断:up / down / none。
+    之前只看"近期同类次数 ≥ 15 且偏离基准 ≥ 8 个百分点",两个问题:同一轮行情里多个币一起触发并不是独立证据
+    (云端样本库只有约 27 天),并且是从多个条件里挑偏离最大的那个(选择偏差)。
+    现在要求该规则先通过长期验证(见 validated_rules),且近期偏离方向与验证方向一致,才给方向。"""
+    if not stats or not baseline or stats["n"] < MIN_N_CALL or not cid:
+        return "none"
+    want = validated_rules().get(cid)
+    if not want:
         return "none"
     edge = stats["up72"] - baseline["up72"]
-    if edge >= EDGE_CALL:
+    if edge >= EDGE_CALL and want == "up":
         return "up"
-    if edge <= -EDGE_CALL:
+    if edge <= -EDGE_CALL and want == "down":
         return "down"
     return "none"
 
@@ -182,9 +204,11 @@ def _pp(x) -> str:
 
 
 def outlook_line(cid: str, st: dict, baseline: dict, scope: str) -> str:
-    call = call_from(st, baseline)
-    word = {"up": "偏涨", "down": "偏跌", "none": "无明显方向"}[call]
+    call = call_from(st, baseline, cid)
+    word = {"up": "偏涨", "down": "偏跌", "none": "无明确方向"}[call]
     small = "(样本少,仅供参考)" if st["n"] < MIN_N_CALL else ""
+    if call == "none" and cid not in validated_rules():
+        small += "(该情形未通过长期检验,只是近期频率,不代表规律)"
     return (f"{RULES_BY_ID[cid].name} → {scope}同类 {st['n']} 次:72h 上涨概率 {_pp(st['up72'])}"
             f"(基准 {_pp(baseline['up72'])}),中位 {_p(st['med72'], 1)},最差 10% {_p(st['p10_72'], 1)},"
             f"持有期最大回撤中位 {_p(st['mae72_med'], 1)} · {word}{small}")
