@@ -15,6 +15,7 @@
   opp_log.csv.gz          机会榜预测留档(每 6 小时一次,含方向分与截面排名,保留 120 天)
   opp_outcomes.csv.gz     机会榜预测的实盘结果:72h / 1 周 / 2 周超额收益与不利变动,永久累积
   opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
+  early_log.csv.gz        早期检测(实验)每次触发一行,到期补 72h / 1 周 / 2 周超额与同期全市场基准,永久累积
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from cryptoradar import early
 from cryptoradar import foresight as fs
 from cryptoradar import opportunity as opp
 from cryptoradar.config import load_config
@@ -216,6 +218,23 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     mstate = fs.market_summary(mframe, mrates)
     preds = list(prev_preds or [])
 
+    # 早期检测(实验):默认不推送,只展示、留档、到期核对。出错不影响主扫描
+    ec = cfg.get("early") or {}
+    early_firing, early_log, early_last = [], (extras or {}).get("prev_early_log"), prev_state.get("early_last", {})
+    early_summary = None
+    if ec.get("enabled", True) is not False:
+        try:
+            early_firing, new_rows, early_last = early.cloud_scan(
+                frames, uni, early.thresholds(ec.get("thresholds")), now, early_last, float(ec.get("cooldown_hours", 24)))
+            base = early_log if early_log is not None and len(early_log) else None
+            early_log = pd.concat([base, new_rows], ignore_index=True) if base is not None else new_rows
+            early_log = early.resolve(early_log, combined)
+            early_summary = early.summary(early_log)
+        except Exception:
+            log.warning("早期检测失败:%s", traceback.format_exc())
+    if extras is not None:
+        extras["early_log"] = early_log
+
     def outlook(sym: str, fired) -> tuple[str, str | None, dict | None, str]:
         cid, st, scope = fs.pick_outlook([r.id for r in fired], sym, rates)
         if not cid:
@@ -255,6 +274,14 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                 rules=[r.id for r in fired], score=score, watch=u["watch"]))
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
+
+    # 早期检测推送(默认关闭;early.push: watchlist 只推自选,true 全部推)
+    push_mode = ec.get("push", False)
+    for x in early_firing:
+        if x.get("new") and (push_mode is True or (push_mode == "watchlist" and x["watch"])):
+            new_events.append({"id": f"{now}-{x['symbol']}-early", "ts": now, "type": "early", "symbol": x["symbol"],
+                               "rank": x["rank"], "watch": x["watch"], "detectors": x["new"], "price": x["price"],
+                               "text": f"{x['symbol']} 早期检测(实验):" + "、".join(x["names"])})
 
     # 价位提醒(穿越时触发一次)
     prices = {u["ccy"]: _num(row.get("close")) for u, row, _ in results}
@@ -390,12 +417,13 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                        "market": mrates},
         "scorecard": sc,
         "scorecard_text": fs.scorecard_text(sc),
+        "early": {"firing": early_firing, "summary": early_summary},
         "opportunity": opp_block,
         "opportunity_live": opp_live,
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
-    state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after},
+    state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after}, "early_last": early_last,
              "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
              "market_state": mstate.get("state") if mstate else prev_ms}
     return signals, events, state, archive, preds
@@ -465,6 +493,9 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
     if sig.get("opportunity") and not sig["opportunity"].get("error"):
         lines += ["", "## 72 小时机会榜(波动 / 回撤 / 概率)"] + opportunity_md(sig["opportunity"], sig.get("opportunity_live"))
+    if sig.get("early"):
+        lines += ["", "## 早期检测(实验,默认不推送)"] + early.text(sig["early"].get("firing") or [],
+                                                         sig["early"].get("summary") or {})
     if sig.get("opportunity_direction"):
         lines += ["", "## 实盘方向核对(72h / 1 周 / 2 周)"] + direction_md(sig["opportunity_direction"])
     if sig.get("ledger_summary"):
@@ -542,6 +573,10 @@ def main() -> None:
     except Exception:
         prev_outcomes = None
     extras: dict = {}
+    try:
+        extras["prev_early_log"] = pd.read_csv(prev / "early_log.csv.gz")
+    except Exception:
+        pass
 
     code = 0
     try:
@@ -583,6 +618,9 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    elog = extras.get("early_log", extras.get("prev_early_log"))
+    if elog is not None and len(elog):
+        elog.to_csv(out / "early_log.csv.gz", index=False)
     if outcomes is not None and len(outcomes):
         outcomes.to_csv(out / "opp_outcomes.csv.gz", index=False)
         opp.direction_daily(outcomes).to_csv(out / "opp_direction_daily.csv", index=False)

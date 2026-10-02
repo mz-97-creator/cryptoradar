@@ -189,6 +189,19 @@ pip install -r requirements-research.txt                      梯度提升和报
   "独立区间"= 覆盖时长 / 持有期,小于 10 时标"仅供参考"。2 周的结论至少要攒几个月才有意义。
 - 偏涨组跑赢比例要和"同期全体跑赢比例"比,不是和 50% 比。
 
+## 五点五之三、早期检测(实验)
+
+`cryptoradar/early.py` 四类只看"向上"的检测,专门抓行情启动阶段(现有规则多在涨幅过半之后才响,见 `studies/lag_study_binance.md`):
+短窗口超额走强 `E_RESID6`、慢涨突破 `E_BREAKOUT`(相对 BTC 创 20 日新高且 7 日相对强弱排名上升)、
+持仓逐步累积 `E_OI_BUILD`、价格上涨但费率仍为负 `E_SQUEEZE`。
+
+- 历史检验:`python early_study.py --start 2025-03-01`(结果见 `studies/early_study.md`)。能明显提前第一次提醒,
+  但触发后平均没有显著超额,精确度不高,所以**默认不推送**。
+- 云端每轮跑一遍,结果在 `status.md` 的"早期检测"一节和 `signals.json` 的 `early`;每次触发(同一币同一检测 24 小时一次)
+  写进 `data` 分支 `early_log.csv.gz`,到期补上 72h / 1 周 / 2 周相对同一时刻全市场平均的超额,按检测汇总。
+- `cloud_config.yaml` 的 `early.push`:`false`(默认)/ `watchlist`(只推自选)/ `true`。实盘攒 1~2 个月再决定。
+- 滞后量化:`python lag_study.py --db` 或 `--archive archive.csv.gz`,看大涨启动后多久第一次报警。
+
 ## 五点六、实盘信号后验表
 
 云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、

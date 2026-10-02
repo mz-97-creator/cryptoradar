@@ -65,11 +65,22 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     f["resid_24h"] = f["ret_24h"] - f["beta"] * f["btc_ret_24h"]
     f["resid_24h_z"] = rolling_z(f["resid_24h"])
     f["ret_1h_z"] = rolling_z(f["ret_1h"])
+    # 早期检测用:6h 超额收益(相对自身 30 天分布)、72h 超额收益、相对 BTC 的对数价格(看是否创新高)
+    f["resid_6h"] = lc.diff(6) - f["beta"] * blc.diff(6)
+    f["resid_6h_z"] = rolling_z(f["resid_6h"])
+    f["resid_72h"] = lc.diff(72) - f["beta"] * blc.diff(72)
+    f["xs_lc"] = lc - blc
 
     oi = df["oi"].ffill(limit=2)
     f["oi"] = oi
     f["oi_chg_24h"] = _safe_log(oi).diff(24)
     f["oi_z"] = rolling_z(f["oi_chg_24h"])
+    # 持仓逐步累积:72h 变化相对自身的 z,以及最近三个 24h 段是否都在增加
+    loi = _safe_log(oi)
+    f["oi_chg_72h"] = loi.diff(72)
+    f["oi_72h_z"] = rolling_z(f["oi_chg_72h"])
+    f["oi_up_days"] = (loi.diff(24) > 0).astype(float) + (loi.diff(24).shift(24) > 0) + (loi.diff(24).shift(48) > 0)
+    f.loc[loi.diff(72).isna(), "oi_up_days"] = np.nan
 
     qv24 = df["quote_volume"].rolling(24, min_periods=20).sum()
     f["vol_24h"] = qv24
