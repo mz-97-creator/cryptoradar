@@ -322,8 +322,6 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
             if fx.get(f"f_{k}_7d") is not None and fx.get(f"f_{k}_ratio") is not None:
                 lines.append(f"- {nm}近 7 天 ${fx[f'f_{k}_7d'] / 1e6:,.2f}M,是之前 4 周周均的 {fx[f'f_{k}_ratio']:.2f} 倍"
                              f"(DefiLlama,数据到 {fx.get('day')})")
-            lines.append("- 历史检验(2025-03~2026-10):触发后 1 周 / 2 周平均跑赢全市场 +0.7% / +1.5%(t≈2.8),"
-                         "中位略负、只有一半左右跑赢,是慢信号不是买点")
         new_events.append({"id": f"{now}-{x['symbol']}-early", "ts": now, "type": "early", "symbol": x["symbol"],
                            "rank": x["rank"], "watch": x["watch"], "detectors": ids, "price": x["price"],
                            "text": "\n".join(lines)})

@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import evalkit as K
 import lag_study as L
 from cryptoradar import early
 from cryptoradar.config import load_config
@@ -29,18 +30,21 @@ from cryptoradar.signals import apply_weights, merged_thresholds
 log = logging.getLogger("early_study")
 HOUR = L.HOUR
 HORIZONS = (72, 168, 336)
+NEW_DETECTORS = ("I_RESILIENT", "I_RECOVERY", "S_ACCUM", "S_LEV_CHASE")    # 阈值在看结果之前定好,保留集对它们干净
 
 
 def nw_t(x: pd.Series, lags: int) -> float:
     x = pd.Series(x, dtype=float).dropna().to_numpy()
     n = len(x)
-    if n < 10:
+    if n < max(10, 2 * lags):           # 样本少于滞后期两倍时 Newey-West 方差不可靠
         return float("nan")
     e = x - x.mean()
     var = np.mean(e * e)
     for l in range(1, min(lags, n - 1) + 1):
         var += 2 * (1 - l / (lags + 1)) * np.mean(e[l:] * e[:-l])
-    return float(x.mean() / np.sqrt(max(var, 1e-18) / n))
+    if not var > 0:
+        return float("nan")
+    return float(x.mean() / np.sqrt(var / n))
 
 
 def decluster(ts: np.ndarray, gap_h: int = 72) -> np.ndarray:
@@ -81,6 +85,8 @@ def main() -> None:
     ap.add_argument("--pre-h", type=int, default=48)
     ap.add_argument("--spot", action="store_true", help="接上币安现货资金流(先运行 python -m cryptoradar.spotflow 回填)")
     ap.add_argument("--fund-history", help="DefiLlama 完整历史的 JSON({mapping, coins}),接上基本面特征")
+    ap.add_argument("--holdout-start", default=K.HOLDOUT_START,
+                    help="保留集起点:之后的数据不参与时机分析,超额收益单独报告(只看一次)")
     ap.add_argument("--out", default=str(Path(__file__).with_name("reports")))
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -101,13 +107,20 @@ def main() -> None:
         from backfill_vision import to_symbol
         from cryptoradar.storage import Store
         conn, store = sqlite3.connect(cfg["storage"]["db_path"]), Store(cfg["storage"]["db_path"])
+        from cryptoradar.features import spot_features
         for sym, f in frames.items():
             ps = to_symbol(sym)                  # 合约名,如 PEPE -> 1000PEPEUSDT
             perp = store.load_hourly(ps).reindex(f.index)
-            sp = spotflow.features(conn, ps, perp)
-            for c in ("spot_buy_z", "spot_buy_dz12", "lev_share_z"):
+            sq = pd.read_sql_query("SELECT ts, quote_volume, taker_buy_quote FROM spot_hourly WHERE symbol=? ORDER BY ts",
+                                   conn, params=[spotflow.spot_symbol(ps)]).drop_duplicates("ts").set_index("ts")
+            if sq.empty:
+                continue
+            sq = sq.reindex(f.index)
+            buy = sq["taker_buy_quote"]
+            sp = spot_features(buy, sq["quote_volume"] - buy, perp["quote_volume"])   # 都是 USDT 计价
+            for c in sp:
                 frames[sym][c] = sp[c].to_numpy()
-        log.info("现货特征:%d 个币有数据", sum(f["spot_buy_z"].notna().any() for f in frames.values()))
+        log.info("现货特征:%d 个币有数据", sum("spot_buy_z" in f and f["spot_buy_z"].notna().any() for f in frames.values()))
     if args.fund_history:
         import json
         from cryptoradar import fundamentals as fd
@@ -135,7 +148,9 @@ def main() -> None:
         lo_ok = max(first_ok + max(args.pre_h, 480) * HOUR, start)    # 20 日新高、7 日排名都需要预热
         idx = f.index.to_numpy()
         in_range = (idx >= lo_ok) & valid
-        coin_hours += int(in_range.sum())
+        hold_ms = int(pd.Timestamp(args.holdout_start, tz="UTC").timestamp() * 1000)
+        dev_range = in_range & (idx < hold_ms)              # 时机分析(第 2、3 节)只用开发期
+        coin_hours += int(dev_range.sum())
         E = early.evaluate_frame(f, eth)
         need = sc.get("watchlist_min_score", 1.0) if sym in watch else sc.get("min_score_to_push", 2.5)
         hits, pushes = L.replay(f, th_rules, rules, need, float(sc.get("cooldown_hours", 6)))
@@ -157,17 +172,18 @@ def main() -> None:
                 row[f"ex{h}"] = fwd[h][sym].reindex(ts).to_numpy() - mkt[h].reindex(ts).to_numpy()
             events.append(row)
         # 2/3. 大涨时机
-        events.append(pd.DataFrame({"symbol": sym, "detector": "__up_push__", "ts": up_push[up_push >= lo_ok],
-                                    "in_early": in_early.reindex(up_push[up_push >= lo_ok]).to_numpy()}))
+        upd = up_push[(up_push >= lo_ok) & (up_push < hold_ms)]
+        events.append(pd.DataFrame({"symbol": sym, "detector": "__up_push__", "ts": upd,
+                                    "in_early": in_early.reindex(upd).to_numpy()}))
         for d in det_ids + ["__up_push__"]:
             on = E[d].to_numpy() if d in E else np.isin(idx, up_push.to_numpy())
-            on = on & in_range
+            on = on & dev_range
             phase_parts.append(pd.DataFrame({"detector": d, "n": int(on.sum()),
                                              **{k: [int((on & v).sum())] for k, v in ph.items()}}))
-        phase_parts.append(pd.DataFrame({"detector": "__base__", "n": int(in_range.sum()),
-                                         **{k: [int((in_range & v).sum())] for k, v in ph.items()}}))
+        phase_parts.append(pd.DataFrame({"detector": "__base__", "n": int(dev_range.sum()),
+                                         **{k: [int((dev_range & v).sum())] for k, v in ph.items()}}))
         first_any_early = {}
-        for t0, t1, g in rallies:
+        for t0, t1, g in [r for r in rallies if r[1] < hold_ms]:      # 只用整段落在开发期的大涨
             x0, x1 = x.get(t0), x.get(t1)
             seg = x.loc[t0:t1]
             q30 = seg.index[(seg - x0).to_numpy() >= 0.3 * (x1 - x0)]
@@ -201,20 +217,59 @@ def main() -> None:
     sp = lambda v: "—" if v is None or pd.isna(v) else f"{v * 100:+.2f}%"
     tt = lambda v: "—" if v is None or pd.isna(v) else f"{v:+.1f}"
     days = coin_hours / 24
-    md = [f"# 早期检测的历史验证(币安,{RR.symbol.nunique()} 个币,{len(RR)} 段大涨)\n",
+    hold_ms = int(pd.Timestamp(args.holdout_start, tz="UTC").timestamp() * 1000)
+    new_ids = set(NEW_DETECTORS)
+    REG = K.regimes(frames)
+    md = [f"# 早期检测的历史验证(币安,{RR.symbol.nunique()} 个币)\n",
           f"大涨 = 相对 BTC 超额 zigzag 涨幅 ≥ {args.min_gain:.0%};事件同一币同一检测至少间隔 72 小时;"
           "超额 = 该币剔除 BTC beta 后的收益减去同一时刻全部币的平均值。\n",
+          f"**开发期** = {args.start or '最早'} ~ {args.holdout_start}(开发期事件的标签窗口不伸进保留集);"
+          f"**保留集** = {args.holdout_start} 之后,只报告、不用于选阈值。"
+          f"带 ★ 的是本轮新增、阈值在看结果之前定好的检测,保留集对它们是干净的;"
+          "其余检测在之前的研究里已经看过全部时段,保留集对它们只是参考。\n",
+          "t:同一天的事件先取平均(同一轮行情多个币一起涨只算一次),再按持有期做 Newey-West;"
+          "独立期 = 覆盖天数 / 持有期天数。Holm / BH:对开发期全部(检测 × 持有期)一起做多重检验校正。\n",
           "## 1. 触发之后的超额收益\n",
-          "| 检测 | 持有期 | 事件数 | 平均 | 中位 | 跑赢全市场比例 | t(NW) | 前半段 / 后半段 |", "|---|---|---|---|---|---|---|---|"]
+          "| 检测 | 持有期 | 开发期:事件数 | 平均 | 中位 | 跑赢比例 | t | 独立期 | Holm p | BH q | 保留集:事件数 | 平均 | t |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    rows = []
     for d in early.DETECTORS:
         sub = EV[EV.detector == d.id] if len(EV) else EV
         for h in HORIZONS:
-            s = event_stats(sub, h) if len(sub) else {"n": 0}
-            if s["n"] < 10:
-                md.append(f"| {d.name}({d.id}) | {h}h | {s['n']} | — | — | — | — | — |")
-                continue
-            md.append(f"| {d.name}({d.id}) | {h}h | {s['n']} | {sp(s['mean'])} | {sp(s['median'])} | {pct(s['hit'])} | "
-                      f"{tt(s['t'])} | {sp(s['first'])} / {sp(s['second'])} |")
+            dev_m, hold_m = K.split_holdout(sub.ts.to_numpy() if len(sub) else np.array([]), args.holdout_start, h)
+            sd = K.event_stats(sub.ts[dev_m], sub[f"ex{h}"][dev_m], h) if len(sub) else {"n": 0}
+            sh = K.event_stats(sub.ts[hold_m], sub[f"ex{h}"][hold_m], h) if len(sub) else {"n": 0}
+            rows.append((d, h, sd, sh))
+    holm, bh = K.adjust([r[2].get("p", np.nan) for r in rows])
+    summary = []
+    for (d, h, sd, sh), ph_, q in zip(rows, holm, bh):
+        name = f"{'★' if d.id in new_ids else ''}{d.name}({d.id})"
+        if sd["n"] < 10:
+            md.append(f"| {name} | {h}h | {sd['n']} | — | — | — | — | — | — | — | {sh['n']} | — | — |")
+            continue
+        hcell = (f"{sh['n']} | {sp(sh.get('mean'))} | {tt(sh.get('t'))}" if sh["n"] >= 10 else f"{sh['n']} | — | —")
+        md.append(f"| {name} | {h}h | {sd['n']} | {sp(sd['mean'])} | {sp(sd['median'])} | {pct(sd['hit'])} | "
+                  f"{tt(sd['t'])} | {sd.get('indep')} | {ph_:.3f} | {q:.3f} | {hcell} |")
+        summary.append({"detector": d.id, "h": h, **{f"dev_{k}": v for k, v in sd.items()},
+                        "holm": ph_, "bh": q, **{f"hold_{k}": v for k, v in sh.items()}})
+    pd.DataFrame(summary).to_csv(out / "early_summary.csv", index=False, encoding="utf-8-sig")
+
+    md += ["", "## 1b. 按大盘环境分组(开发期,持有 1 周)\n",
+           "同一检测在不同行情里可能相反。只列事件数 ≥ 30 的组;这里没有再做多重检验校正,|t| < 3 都只当线索。\n",
+           "| 检测 | 分组方式 | 组 | 事件数 | 平均超额 | t |", "|---|---|---|---|---|---|"]
+    h = 168
+    for d in early.DETECTORS:
+        sub = EV[EV.detector == d.id] if len(EV) else EV
+        if not len(sub):
+            continue
+        sub = sub[K.split_holdout(sub.ts.to_numpy(), args.holdout_start, h)[0]]
+        lab = REG.reindex(sub.ts.to_numpy())
+        for col in REG.columns:
+            for g, idx_g in sub.groupby(lab[col].to_numpy()).groups.items():
+                gg = sub.loc[idx_g]
+                st = K.event_stats(gg.ts, gg[f"ex{h}"], h)
+                if st["n"] >= 30:
+                    md.append(f"| {d.id} | {col} | {g} | {st['n']} | {sp(st.get('mean'))} | {tt(st.get('t'))} |")
     md += ["", "## 2. 在大涨里的时机\n",
            "倾向 = 触发小时落在该阶段的比例 ÷ 随机一个小时落在该阶段的比例;初段命中 = 这段大涨的初段(最低点到涨幅走完 30%)里它至少响过一次。\n",
            "精确度 = 去重后的每次触发里,当时正处在某段大涨初段的比例(其余都是没有接着大涨的\"假启动\")。\n",
@@ -226,7 +281,7 @@ def main() -> None:
         lift = lambda ph: (r[ph] / max(r["n"], 1)) / (base[ph] / base["n"]) if r["n"] else np.nan
         hit = RR[f"{k}_early"].mean() if d else (RR["up_push_done"] <= 0.3).mean()
         name = f"{d.name}({d.id})" if d else "对照:现有\"像在涨\"的推送"
-        ev = EV[EV.detector == k]
+        ev = EV[(EV.detector == k) & (EV.ts < hold_ms)]
         md.append(f"| {name} | {r['n'] / days:.2f} | {lift('pre'):.2f} | {lift('early'):.2f} | {lift('late'):.2f} | {pct(hit)} | "
                   f"{pct(ev.in_early.mean())} | {len(ev) / days * 30:.1f} |")
     md.append(f"\n参照:随机一个小时正处在某段大涨初段的比例 {base['early'] / base['n']:.0%}。")

@@ -478,13 +478,15 @@ def nw_t(x, lags: int) -> float:
     相邻截面的收益大段重叠,不校正 t 会被高估好几倍。"""
     x = pd.Series(x, dtype=float).dropna().to_numpy()
     n = len(x)
-    if n < 10:
+    if n < max(10, 2 * lags):           # 样本少于滞后期两倍时 Newey-West 方差不可靠
         return float("nan")
     e = x - x.mean()
     var = np.mean(e * e)
     for l in range(1, min(lags, n - 1) + 1):
         var += 2 * (1 - l / (lags + 1)) * np.mean(e[l:] * e[:-l])
-    return float(x.mean() / np.sqrt(max(var, 1e-18) / n))
+    if not var > 0:
+        return float("nan")
+    return float(x.mean() / np.sqrt(var / n))
 
 
 def direction_cross_sections(outcomes: pd.DataFrame, h: int, min_coins: int = 10) -> pd.DataFrame:

@@ -12,6 +12,10 @@ lag_study.py 的结论:现有规则里 OI_TREND / RESID / VOL 多在涨幅过半
   F_REV_UP    回购/协议收入加速:持币人收入(没有则看协议收入)最近 7 日 ≥ 之前 4 周周均的 1.3 倍
   F_FEES_UP   协议费用(使用量)加速:同上,看总费用
   F_TVL_UP    TVL 7 日增长 ≥ 10%
+  I_RESILIENT 大盘走弱(BTC 7 日下跌)时抗跌:BTC 下跌小时里的超额排名进入前 20% 且 3 天内明显上升
+  I_RECOVERY  回调后快速收复:7 日高点到 48h 低点回撤 ≥ 8%,已收复 ≥ 70%,收复速度全市场前 20%
+  S_ACCUM     现货持续净买入、价格未反应:72h 现货净买入 z ≥ 1.5 且连续 3 天高于平时,价格、持仓都还平稳,费率不高
+  S_LEV_CHASE 杠杆追涨、现货不确认:72h 已涨 5% 以上,持仓和费率都明显升高,现货净买入不高(偏风险信号)
   基本面(F_*)来自 cryptoradar/fundamentals.py(DefiLlama,日频),现货(S_*)来自 OKX 现货主动买卖量 / 币安现货 K 线。
 
 这些检测在验证有效之前默认不推送,只写进 status.md / signals.json 并留档,到期用 72h / 1 周 / 2 周的实盘结果核对。
@@ -42,6 +46,20 @@ DEFAULTS = {
     "f_ratio": 1.3,           # F_*:最近 7 日 / 之前 28 日周均值
     "f_min_usd_7d": 50_000,   # F_REV_UP / F_FEES_UP:最近 7 日至少这么多美元,太小的不看
     "f_tvl_7d": 0.10,         # F_TVL_UP:TVL 7 日对数变化
+    # 以下 4 条(I_* / S_ACCUM / S_LEV_CHASE)的阈值在看任何结果之前拍定,之后不再按结果调整:
+    "res_rank": 0.80,         # I_RESILIENT:大盘跌时超额的全市场排名(前 20%)
+    "res_rank_rise": 0.20,    # I_RESILIENT:比 3 天前排名上升
+    "res_min_down_h": 40,     # I_RESILIENT:7 日内至少 40 个 BTC 下跌小时(样本太少不算)
+    "rec_depth": 0.08,        # I_RECOVERY:7 日高点到 48h 低点至少回撤 8%
+    "rec_rebound": 0.70,      # I_RECOVERY:已收复 70% 以上
+    "rec_rank": 0.80,         # I_RECOVERY:收复比例的全市场排名
+    "accum_z": 1.5,           # S_ACCUM:72h 现货净买入占比 z
+    "accum_ret_cap": 0.03,    # S_ACCUM:72h 超额绝对值低于它(价格还没反应)
+    "accum_oi_z": 1.0,        # S_ACCUM:72h 持仓变化 |z| 低于它(持仓平稳)
+    "accum_funding": 0.0001,  # S_ACCUM:资金费率 ≤ 0.01%/8h(中性或为负)
+    "chase_ret": 0.05,        # S_LEV_CHASE:72h 超额 > 5%
+    "chase_z": 1.5,           # S_LEV_CHASE:持仓 72h z 和费率 z 都 ≥ 它
+    "chase_spot_max": 0.5,    # S_LEV_CHASE:现货净买入 z 低于它(现货不确认)
 }
 
 
@@ -91,6 +109,22 @@ DETECTORS += [
              lambda f, t: (_c(f, "f_fees_7d") >= t["f_min_usd_7d"]) & (_c(f, "f_fees_ratio") >= t["f_ratio"])),
     Detector("F_TVL_UP", "TVL 明显增长", lambda f, t: _c(f, "f_tvl_chg_7d") >= t["f_tvl_7d"]),
 ]
+DETECTORS += [
+    Detector("I_RESILIENT", "大盘走弱时抗跌、独立强势形成",
+             lambda f, t: (_c(f, "btc_ret_7d") < 0) & (_c(f, "de_rank") >= t["res_rank"])
+             & (_c(f, "de_rank_chg") >= t["res_rank_rise"]) & (_c(f, "down_hours_7d") >= t["res_min_down_h"])
+             & (_c(f, "resid_24h_z") < t["resid24_cap"])),
+    Detector("I_RECOVERY", "回调后快速收复",
+             lambda f, t: (_c(f, "pullback_depth") >= t["rec_depth"]) & (_c(f, "rebound_48h") >= t["rec_rebound"])
+             & (_c(f, "rb_rank") >= t["rec_rank"]) & (_c(f, "resid_24h_z") < t["resid24_cap"])),
+    Detector("S_ACCUM", "现货持续净买入、价格未反应(真实需求)",
+             lambda f, t: (_c(f, "spot_net72_z") >= t["accum_z"]) & (_c(f, "spot_days_pos") >= 3)
+             & (_c(f, "resid_72h").abs() < t["accum_ret_cap"]) & (_c(f, "oi_72h_z").abs() < t["accum_oi_z"])
+             & (_c(f, "funding") <= t["accum_funding"])),
+    Detector("S_LEV_CHASE", "杠杆追涨、现货不确认(偏风险)",
+             lambda f, t: (_c(f, "resid_72h") > t["chase_ret"]) & (_c(f, "oi_72h_z") >= t["chase_z"])
+             & (_c(f, "funding_z") >= t["chase_z"]) & (_c(f, "spot_net72_z") < t["chase_spot_max"])),
+]
 DETECTORS_BY_ID = {d.id: d for d in DETECTORS}
 
 
@@ -112,9 +146,22 @@ def add_cross_section(frames: dict[str, pd.DataFrame], breakout_days: int = DEFA
         lc = np.log(f["close"].where(f["close"] > 0))
         r7[sym] = lc.diff(168) - f["beta"] * f["_btc_lc"].diff(168)
     rank = pd.DataFrame(r7).rank(axis=1, pct=True) if r7 else pd.DataFrame()
+    pick = lambda col: pd.DataFrame({s: f[col] for s, f in frames.items()
+                                     if s not in exclude and not f.empty and col in f})
+    de = pick("down_excess_7d")
+    de_rank = de.rank(axis=1, pct=True) if not de.empty else pd.DataFrame()
+    rb = pick("rebound_48h")
+    rb_rank = rb.rank(axis=1, pct=True) if not rb.empty else pd.DataFrame()
     out = {}
     for sym, f in frames.items():
         f = f.copy()
+        if "_btc_lc" in f:
+            f["btc_ret_7d"] = f["_btc_lc"].diff(168)
+        if sym in de_rank:
+            f["de_rank"] = de_rank[sym].reindex(f.index)
+            f["de_rank_chg"] = f["de_rank"] - f["de_rank"].shift(72)
+        if sym in rb_rank:
+            f["rb_rank"] = rb_rank[sym].reindex(f.index)
         if sym in rank:
             f["rs_rank"] = rank[sym].reindex(f.index)
             f["rs_rank_chg"] = f["rs_rank"] - f["rs_rank"].shift(72)
@@ -201,13 +248,13 @@ def resolve(log: pd.DataFrame, combined: dict[str, pd.DataFrame]) -> pd.DataFram
 def _nw_t(x: pd.Series, lags: int) -> float | None:
     x = x.dropna().to_numpy()
     n = len(x)
-    if n < 10:
+    if n < max(10, 2 * lags):           # 样本少于滞后期两倍时 Newey-West 方差不可靠
         return None
     e = x - x.mean()
     var = np.mean(e * e)
     for l in range(1, min(lags, n - 1) + 1):
         var += 2 * (1 - l / (lags + 1)) * np.mean(e[l:] * e[:-l])
-    return float(x.mean() / np.sqrt(max(var, 1e-18) / n))
+    return float(x.mean() / np.sqrt(var / n)) if var > 0 else None
 
 
 def summary(log: pd.DataFrame | None, min_n: int = 30) -> dict:
