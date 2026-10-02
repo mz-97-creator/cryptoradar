@@ -252,7 +252,7 @@ def write_report(out: Path, src: str, args, R: pd.DataFrame, rule_tab: pd.DataFr
                f"| 币 | 启动(UTC) | 见顶 | 涨幅 | 启动前 {args.pre_h}h 推送 | 启动后第一次推送 | 已走完 | 推送规则 | 第一次\"像在涨\"的推送 | 已走完 | 剩余 | 规则 |",
                "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in F.itertuples():
-            md.append(f"| {r.symbol} | {pd.to_datetime(r.start, unit='ms'):%m-%d %H:%M} | {pd.to_datetime(r.peak, unit='ms'):%m-%d %H:%M} | "
+            md.append(f"| {r.symbol} | {pd.to_datetime(r.start, unit='ms'):%Y-%m-%d %H:%M} | {pd.to_datetime(r.peak, unit='ms'):%m-%d %H:%M} | "
                       f"{pct(r.gain)} | {r.push_pre_rules or '无'} | {hours(r.push_lag_h)} | {pct(r.push_done)} | {r.push_rules or '漏报'} | "
                       f"{hours(r.uppush_lag_h)} | {pct(r.uppush_done)} | {pct(r.uppush_left)} | {r.uppush_rules or '漏报'} |")
         md.append("")
