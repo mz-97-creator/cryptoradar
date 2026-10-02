@@ -57,14 +57,22 @@ def _chain_tvl(chain: str) -> dict[str, float] | None:
 
 
 def protocol_tvl_change(protos: list[dict] | None = None) -> dict[str, float]:
-    """{协议 slug: TVL 7 日对数变化},来自 /protocols 的 change_7d(百分比)。"""
+    """{协议 slug 或父协议名: TVL 7 日对数变化}。/protocols 的 change_7d 记在各个子协议(如 aave-v3)上,
+    按父协议汇总:现值相加、7 天前的值(现值 / (1 + change_7d))相加,再算变化。对应关系(build_mapping)用的是父协议名。"""
     protos = protos if protos is not None else (_get(f"{BASE}/protocols") or [])
-    out = {}
+    now, ago = {}, {}
     for p in protos:
-        c = p.get("change_7d")
-        if p.get("slug") and c is not None and c > -100:
-            out[p["slug"]] = float(np.log1p(c / 100))
-    return out
+        c, tvl = p.get("change_7d"), p.get("tvl")
+        if not p.get("slug") or c is None or c <= -100 or not tvl or tvl <= 0:
+            continue
+        prev = tvl / (1 + c / 100)
+        keys = {p["slug"]}
+        if p.get("parentProtocol"):
+            keys.add(p["parentProtocol"].replace("parent#", ""))
+        for k in keys:
+            now[k] = now.get(k, 0.0) + tvl
+            ago[k] = ago.get(k, 0.0) + prev
+    return {k: float(np.log(now[k] / ago[k])) for k in now if ago.get(k, 0) > 0}
 
 
 def fetch_coin(m: dict, keep_days: int | None = KEEP_DAYS, now_s: float | None = None) -> dict:
