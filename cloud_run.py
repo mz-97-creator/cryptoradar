@@ -564,7 +564,7 @@ def status_md(sig: dict, events: list) -> str:
     if sig.get("events_recent"):
         lines += ["", "## 事件(近 48 小时首次看到;只记录,不推送)"] + sig["events_recent"]
     if sig.get("early"):
-        lines += ["", "## 早期检测(实验,默认不推送)"] + early.text(sig["early"].get("firing") or [],
+        lines += ["", "## 早期检测(实验;只有自选币的回购/收入加速会推送)"] + early.text(sig["early"].get("firing") or [],
                                                          sig["early"].get("summary") or {})
     if sig.get("opportunity_direction"):
         lines += ["", "## 实盘方向核对(72h / 1 周 / 2 周)"] + direction_md(sig["opportunity_direction"])
