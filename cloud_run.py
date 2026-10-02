@@ -15,6 +15,8 @@
   opp_log.csv.gz          机会榜预测留档(每 6 小时一次,含方向分与截面排名,保留 120 天)
   opp_outcomes.csv.gz     机会榜预测的实盘结果:72h / 1 周 / 2 周超额收益与不利变动,永久累积
   opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
+  features/YYYY-MM.csv.gz      永久特征库:每币每小时的原始输入(K 线、持仓、费率、多空比、主动买卖、现货买卖),首次看到的值
+  fundamentals/YYYY-MM.csv.gz  永久基本面库:每币每个数据日的 DefiLlama 特征,首次看到的值和时间
   fundamentals.json       DefiLlama 基本面(费用、收入、持币人收入/回购、TVL)最近 120 天,每币每天刷新一次
   early_log.csv.gz        早期检测(实验)每次触发一行,到期补 72h / 1 周 / 2 周超额与同期全市场基准,永久累积
 """
@@ -35,6 +37,7 @@ import pandas as pd
 import requests
 
 from cryptoradar import early
+from cryptoradar import featstore
 from cryptoradar import foresight as fs
 from cryptoradar import fundamentals as fd
 from cryptoradar import opportunity as opp
@@ -210,6 +213,12 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         results.append((u, f.iloc[-1], evaluate_last(f, th, rules)))
         frames[u["ccy"]] = f
 
+    if extras is not None:          # 永久特征库(main 里写盘)
+        try:
+            extras["feat_rows"] = featstore.hourly_rows(data, frames, now)
+        except Exception:
+            log.warning("特征库整理失败:%s", traceback.format_exc())
+
     # 历史概率与市场状态(样本 = 本轮拉到的约 37 天 + data 分支里积累的样本库)
     combined = fs.merge_archive(prev_archive, frames)
     labeled = fs.label_frames(combined, th)
@@ -236,6 +245,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
             log.warning("基本面刷新失败:%s", traceback.format_exc())
     if extras is not None:
         extras["fundamentals"] = fstore
+        extras["fund_rows"] = featstore.fundamental_rows(ffeat)
     if ec.get("enabled", True) is not False:
         try:
             early_firing, new_rows, early_last = early.cloud_scan(
@@ -682,6 +692,16 @@ def main() -> None:
     if outcomes is not None and len(outcomes):
         outcomes.to_csv(out / "opp_outcomes.csv.gz", index=False)
         opp.direction_daily(outcomes).to_csv(out / "opp_direction_daily.csv", index=False)
+    # 永久特征库:旧月份原样带过来,只改写有新数据的月份。出错时也必须把旧文件带过来,否则强推 data 分支会删掉历史
+    try:
+        res = featstore.save(prev, out, extras.get("feat_rows"), extras.get("fund_rows"), now_ms())
+        log.info("特征库:%s", res)
+    except Exception:
+        log.warning("特征库写入失败,原样保留旧文件:%s", traceback.format_exc())
+        import shutil
+        for sub in (featstore.FEAT_DIR, featstore.FUND_DIR):
+            if (prev / sub).exists():
+                shutil.copytree(prev / sub, out / sub, dirs_exist_ok=True)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 

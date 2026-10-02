@@ -210,6 +210,18 @@ pip install -r requirements-research.txt                      梯度提升和报
   推送内容含近 7 天持币人收入(或协议收入)及加速倍数。其余检测只展示和留档,实盘攒 1~2 个月再决定。
 - 滞后量化:`python lag_study.py --db` 或 `--archive archive.csv.gz`,看大涨启动后多久第一次报警。
 
+## 五点五之四、永久特征库(为用 OKX 自己的数据训练做准备)
+
+现在的机会模型用币安历史训练、在 OKX 上运行,持仓量、费率等差别很大。云端每轮把 OKX 原始数据按小时存进 `data` 分支:
+
+- `features/YYYY-MM.csv.gz`:每币每小时一行,只存已收盘的 K 线;列为 K 线、成交额、持仓、多空比、主动买卖比、
+  现货主动买卖量、资金费率(8 小时口径),以及 `seen_at`(这一行第一次存入的时间)。
+- `fundamentals/YYYY-MM.csv.gz`:每币每个数据日一行的 DefiLlama 特征,同样带 `seen_at`。
+- "首次看到"原则:同一行以第一次存入的值为准,之后接口修订不覆盖,只补缺失值;研究时可以严格只用当时已经看到的数据,
+  也能检查一条信息第一次出现时价格是否已经反应。
+- 只存原始输入,特征用 `featstore.to_frames` 读回后交给 `features.build_features` 重算即可(测试里验证过一致)。
+  约 83 个币每月 2.7 MB。读回:`from cryptoradar import featstore; raw = featstore.load("data 分支目录")`。
+
 ## 五点六、实盘信号后验表
 
 云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
