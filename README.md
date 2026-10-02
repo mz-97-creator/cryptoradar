@@ -199,6 +199,12 @@ pip install -r requirements-research.txt                      梯度提升和报
   但触发后平均没有显著超额,精确度不高,所以**默认不推送**。
 - 云端每轮跑一遍,结果在 `status.md` 的"早期检测"一节和 `signals.json` 的 `early`;每次触发(同一币同一检测 24 小时一次)
   写进 `data` 分支 `early_log.csv.gz`,到期补上 72h / 1 周 / 2 周相对同一时刻全市场平均的超额,按检测汇总。
+- 另有四类非价格检测,同样只展示、留档、到期核对:
+  - `S_SPOT_LED` 现货买盘主导走强:OKX 现货主动买入占比(`spot_buy_z`)明显高于平时且在上升,合约成交占比不高,价格还没大动;
+  - `F_REV_UP` 回购/协议收入加速、`F_FEES_UP` 协议费用加速、`F_TVL_UP` TVL 7 日增长 ≥ 10%:
+    数据来自 `cryptoradar/fundamentals.py`(DefiLlama,免费),云端每轮最多花 60 秒刷新最久没更新的币,每币每天一次,
+    存 `data` 分支 `fundamentals.json`(`cloud_config.yaml` 的 `fundamentals:`)。
+- `status.md` 的回购表同时列出手填估算和实时值(DefiLlama 持币人收入近 30 天年化、对应收益率、近 7 天 vs 前 4 周的加速倍数)。
 - `cloud_config.yaml` 的 `early.push`:`false`(默认)/ `watchlist`(只推自选)/ `true`。实盘攒 1~2 个月再决定。
 - 滞后量化:`python lag_study.py --db` 或 `--archive archive.csv.gz`,看大涨启动后多久第一次报警。
 

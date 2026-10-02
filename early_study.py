@@ -1,4 +1,4 @@
-"""早期检测(cryptoradar/early.py)的历史验证:能不能比现有推送更早抓到大涨,触发之后有没有超额收益。
+"""早期检测(cryptoradar/early.py,含现货 S_* 与基本面 F_*)的历史验证:能不能比现有推送更早抓到大涨,触发之后有没有超额收益。
 
 三个问题:
   1. 触发之后:72h / 1 周 / 2 周相对全市场(同一时刻全部币的平均超额)还有没有超额收益?
@@ -9,6 +9,7 @@
 
 用法(先用 backfill_vision.py 回填币安历史):
   python early_study.py --start 2025-03-01
+  python early_study.py --start 2025-03-01 --spot --fund-history data/fund_history.json   连同现货与基本面检测
 结果:reports/early_study.md、reports/early_events.csv
 """
 from __future__ import annotations
@@ -78,6 +79,8 @@ def main() -> None:
     ap.add_argument("--min-gain", type=float, default=0.20)
     ap.add_argument("--reversal", type=float, default=0.10)
     ap.add_argument("--pre-h", type=int, default=48)
+    ap.add_argument("--spot", action="store_true", help="接上币安现货资金流(先运行 python -m cryptoradar.spotflow 回填)")
+    ap.add_argument("--fund-history", help="DefiLlama 完整历史的 JSON({mapping, coins}),接上基本面特征")
     ap.add_argument("--out", default=str(Path(__file__).with_name("reports")))
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -89,8 +92,31 @@ def main() -> None:
     eth = early.thresholds(rc.get("early", {}).get("thresholds"))
     watch = {s.upper() for s in rc["universe"].get("watchlist", [])}
     syms = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
-    frames = L.frames_from_db(load_config(args.config), syms)
+    cfg = load_config(args.config)
+    frames = L.frames_from_db(cfg, syms)
     frames.pop("BTC", None)
+    if args.spot:
+        import sqlite3
+        from cryptoradar import spotflow
+        from backfill_vision import to_symbol
+        from cryptoradar.storage import Store
+        conn, store = sqlite3.connect(cfg["storage"]["db_path"]), Store(cfg["storage"]["db_path"])
+        for sym, f in frames.items():
+            ps = to_symbol(sym)                  # 合约名,如 PEPE -> 1000PEPEUSDT
+            perp = store.load_hourly(ps).reindex(f.index)
+            sp = spotflow.features(conn, ps, perp)
+            for c in ("spot_buy_z", "spot_buy_dz12", "lev_share_z"):
+                frames[sym][c] = sp[c].to_numpy()
+        log.info("现货特征:%d 个币有数据", sum(f["spot_buy_z"].notna().any() for f in frames.values()))
+    if args.fund_history:
+        import json
+        from cryptoradar import fundamentals as fd
+        fh = json.loads(Path(args.fund_history).read_text(encoding="utf-8"))
+        for sym in list(frames):
+            s = fh["coins"].get(sym)
+            if s:
+                frames[sym] = fd.attach_history(frames[sym], fd.daily_features(s))
+        log.info("基本面特征:%d 个币有数据", sum(1 for s in frames if s in fh["coins"]))
     frames = early.add_cross_section(frames, int(eth["breakout_days"]))
     start = int(pd.Timestamp(args.start, tz="UTC").timestamp() * 1000) if args.start else -np.inf
 
