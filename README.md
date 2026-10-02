@@ -196,7 +196,7 @@ pip install -r requirements-research.txt                      梯度提升和报
 持仓逐步累积 `E_OI_BUILD`、价格上涨但费率仍为负 `E_SQUEEZE`。
 
 - 历史检验:`python early_study.py --start 2025-03-01`(结果见 `studies/early_study.md`)。能明显提前第一次提醒,
-  但触发后平均没有显著超额,精确度不高,所以**默认不推送**。
+  价格/现货类触发后平均没有显著超额,精确度不高,不推送;回购/协议收入加速有 1~2 周的超额(t≈2.8),只对自选币推送。
 - 云端每轮跑一遍,结果在 `status.md` 的"早期检测"一节和 `signals.json` 的 `early`;每次触发(同一币同一检测 24 小时一次)
   写进 `data` 分支 `early_log.csv.gz`,到期补上 72h / 1 周 / 2 周相对同一时刻全市场平均的超额,按检测汇总。
 - 另有四类非价格检测,同样只展示、留档、到期核对:
@@ -205,7 +205,9 @@ pip install -r requirements-research.txt                      梯度提升和报
     数据来自 `cryptoradar/fundamentals.py`(DefiLlama,免费),云端每轮最多花 60 秒刷新最久没更新的币,每币每天一次,
     存 `data` 分支 `fundamentals.json`(`cloud_config.yaml` 的 `fundamentals:`)。
 - `status.md` 的回购表同时列出手填估算和实时值(DefiLlama 持币人收入近 30 天年化、对应收益率、近 7 天 vs 前 4 周的加速倍数)。
-- `cloud_config.yaml` 的 `early.push`:`false`(默认)/ `watchlist`(只推自选)/ `true`。实盘攒 1~2 个月再决定。
+- 推送:`cloud_config.yaml` 的 `early.push`(`false` / `watchlist` 只推自选 / `true`)和 `push_detectors`(推哪几类)。
+  目前配置为**只对自选币推送 `F_REV_UP`**(历史检验里唯一有超额的),推送后同一币 7 天内不再推(`push_cooldown_hours`);
+  推送内容含近 7 天持币人收入(或协议收入)及加速倍数。其余检测只展示和留档,实盘攒 1~2 个月再决定。
 - 滞后量化:`python lag_study.py --db` 或 `--archive archive.csv.gz`,看大涨启动后多久第一次报警。
 
 ## 五点六、实盘信号后验表

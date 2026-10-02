@@ -290,13 +290,34 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
 
-    # 早期检测推送(默认关闭;early.push: watchlist 只推自选,true 全部推)
+    # 早期检测推送(默认关闭)。early.push: false / watchlist(只推自选)/ true;push_detectors 限定推哪几类;
+    # 推送冷却 push_cooldown_hours(默认 7 天)独立于留档冷却:回购、收入这类日频信号一旦加速会连续好几天成立,只在新一轮时推
     push_mode = ec.get("push", False)
+    push_ids = set(ec.get("push_detectors") or early.DETECTORS_BY_ID)
+    push_cd = float(ec.get("push_cooldown_hours", 168)) * HOUR_MS
+    push_last = dict(prev_state.get("early_push_last", {}))
     for x in early_firing:
-        if x.get("new") and (push_mode is True or (push_mode == "watchlist" and x["watch"])):
-            new_events.append({"id": f"{now}-{x['symbol']}-early", "ts": now, "type": "early", "symbol": x["symbol"],
-                               "rank": x["rank"], "watch": x["watch"], "detectors": x["new"], "price": x["price"],
-                               "text": f"{x['symbol']} 早期检测(实验):" + "、".join(x["names"])})
+        if not (push_mode is True or (push_mode == "watchlist" and x["watch"])):
+            continue
+        ids = [d for d in x["detectors"] if d in push_ids and now - int(push_last.get(f"{x['symbol']}|{d}", 0)) > push_cd]
+        if not ids:
+            continue
+        for d in ids:
+            push_last[f"{x['symbol']}|{d}"] = now
+        lines = [f"{x['symbol']} 早期检测(实验):" + "、".join(early.DETECTORS_BY_ID[d].name for d in ids)]
+        fx = ffeat.get(x["symbol"]) or {}
+        if "F_REV_UP" in ids:
+            k = "hrev" if (fx.get("f_hrev_7d") or 0) >= early.thresholds(ec.get("thresholds"))["f_min_usd_7d"] else "rev"
+            nm = "持币人收入(回购/分红)" if k == "hrev" else "协议收入"
+            if fx.get(f"f_{k}_7d") is not None and fx.get(f"f_{k}_ratio") is not None:
+                lines.append(f"- {nm}近 7 天 ${fx[f'f_{k}_7d'] / 1e6:,.2f}M,是之前 4 周周均的 {fx[f'f_{k}_ratio']:.2f} 倍"
+                             f"(DefiLlama,数据到 {fx.get('day')})")
+            lines.append("- 历史检验(2025-03~2026-10):触发后 1 周 / 2 周平均跑赢全市场 +0.7% / +1.5%(t≈2.8),"
+                         "中位略负、只有一半左右跑赢,是慢信号不是买点")
+        new_events.append({"id": f"{now}-{x['symbol']}-early", "ts": now, "type": "early", "symbol": x["symbol"],
+                           "rank": x["rank"], "watch": x["watch"], "detectors": ids, "price": x["price"],
+                           "text": "\n".join(lines)})
+    push_last = {k: v for k, v in push_last.items() if now - v <= max(push_cd, 30 * 24 * HOUR_MS)}
 
     # 价位提醒(穿越时触发一次)
     prices = {u["ccy"]: _num(row.get("close")) for u, row, _ in results}
@@ -450,6 +471,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
     state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after}, "early_last": early_last,
+             "early_push_last": push_last,
              "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
              "market_state": mstate.get("state") if mstate else prev_ms}
     return signals, events, state, archive, preds

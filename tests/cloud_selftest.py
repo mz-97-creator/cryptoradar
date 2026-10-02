@@ -107,6 +107,7 @@ def main():
     fake_store = {"mapping": {"OP": {"chain": "Optimism", "protocol": None}}, "mapping_at": _t.time(),
                   "coins": {"OP": {"at": _t.time(), "fees": hrev, "rev": hrev, "hrev": hrev, "tvl": None}}}
     cloud_run.fd.refresh = lambda store, coins, budget_s=60: fake_store
+    cfg["early"] = {"push": "watchlist", "push_detectors": ["F_REV_UP"], "push_cooldown_hours": 168}
     m = Market(hours=1000)
 
     print("\n[1] 第一轮")
@@ -124,6 +125,10 @@ def main():
           and abs(bb["OP"]["live_ratio_7d"] - 2.0) < 1e-9, f"实时回购:年化 {bb['OP']['live_annual_usd']:,.0f},7 日加速 {bb['OP']['live_ratio_7d']}")
     ef = {x["symbol"]: x for x in sig["early"]["firing"]}
     check("OP" in ef and {"F_REV_UP", "F_FEES_UP"} <= set(ef["OP"]["detectors"]), f"基本面检测触发:{ef.get('OP')}")
+    ee = [e for e in events if e["type"] == "early"]
+    check(len(ee) == 1 and ee[0]["symbol"] == "OP" and ee[0]["detectors"] == ["F_REV_UP"] and "2.00 倍" in ee[0]["text"],
+          f"自选币推送回购加速(只推 F_REV_UP):{ee[0]['text'] if ee else None}")
+    check(state.get("early_push_last", {}).get("OP|F_REV_UP"), "推送冷却已记录")
     check(sig["watchlist"] and sig["watchlist"][0]["symbol"] == "OP", "自选 OP 在快照里")
     check("USDC" not in {f["symbol"] for f in sig["firing"]}, "稳定币已排除")
     print("\n" + sig["watchlist"][0]["text"] + "\n")

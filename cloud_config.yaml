@@ -19,11 +19,14 @@ signals:
     ls_z: 2.5
 
 # 早期检测(实验,见 cryptoradar/early.py 和 studies/early_study.md):专门抓行情启动阶段。
-# 历史检验里能比现有推送更早响,但触发后平均没有显著超额,所以默认只展示和留档、不推送;
-# 实盘 1~2 个月后看 status.md 的"早期检测"一节再决定。push: false / watchlist(只推自选) / true(全部推)
+# 历史检验(studies/early_study.md):价格/现货类能更早响但触发后没有显著超额,只展示和留档;
+# 回购/协议收入加速 F_REV_UP 是唯一有超额的(1~2 周),先只对自选币推送。
+# push: false / watchlist(只推自选) / true(全部推);实盘 1~2 个月后看 status.md 的"早期检测"一节再调整
 early:
   enabled: true
-  push: false
+  push: watchlist         # 只推自选币
+  push_detectors: [F_REV_UP]   # 只推历史检验里站得住的"回购/协议收入加速"(t≈2.8),其余只展示和留档
+  push_cooldown_hours: 168     # 同一币同一检测推送后 7 天内不再推(回购加速常连续好几天成立)
   cooldown_hours: 24      # 同一币同一检测 24 小时内只留档一次
   thresholds: {}          # 不写用默认值,见 early.DEFAULTS
 
