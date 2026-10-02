@@ -45,6 +45,16 @@ def collect(okx: OKX, ccy: str, inst_id: str) -> tuple[pd.DataFrame, pd.Series, 
             tk[int(r[0])] = buy / sell
     df["taker_ratio"] = pd.Series(tk, dtype=float).reindex(df.index)
 
+    # 现货主动买卖量(币数量,rubik 时间戳视为该小时的开始);拿不到时留空,现货相关特征和检测自动不触发
+    try:
+        sp = okx.taker_spot(ccy)
+    except Exception:
+        sp = []
+    sell = {int(r[0]): _f(r[1]) for r in sp}
+    buy = {int(r[0]): _f(r[2]) for r in sp}
+    df["spot_buy"] = pd.Series(buy, dtype=float).reindex(df.index)
+    df["spot_sell"] = pd.Series(sell, dtype=float).reindex(df.index)
+
     hist = okx.funding_history(inst_id)
     funding = pd.Series({int(h["fundingTime"]): _f(h.get("realizedRate") or h.get("fundingRate"))
                          for h in hist}, dtype=float).sort_index()

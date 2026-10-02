@@ -11,7 +11,15 @@
   status.md     方便在 GitHub 网页上直接查看的中文摘要
   archive.csv.gz   全市场小时特征样本库(最近 180 天),历史概率用,随时间增长
   predictions.json 每条预警当时的历史概率和到期后的真实结果(记分卡)
-  ledger.csv    信号后验记录表:每条推送的信号一行(规则、得分、24h/72h 真实收益与回撤),永久累积
+  ledger.csv    信号后验记录表:每条推送的信号一行(规则、得分、24h/72h/1 周/2 周真实收益与回撤),永久累积
+  opp_log.csv.gz          机会榜预测留档(每 6 小时一次,含方向分与截面排名,保留 120 天)
+  opp_outcomes.csv.gz     机会榜预测的实盘结果:72h / 1 周 / 2 周超额收益与不利变动,永久累积
+  opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
+  features/YYYY-MM.csv.gz      永久特征库:每币每小时的原始输入(K 线、持仓、费率、多空比、主动买卖、现货买卖),首次看到的值
+  fundamentals/YYYY-MM.csv.gz  永久基本面库:每币每个数据日的 DefiLlama 特征,首次看到的值和时间
+  event_log.csv.gz        事件库:上新(OKX/币安公告、各交易所交易对清单比对)、HYPE 链上回购,官方时间 + 首次看到的时间,永久累积
+  fundamentals.json       DefiLlama 基本面(费用、收入、持币人收入/回购、TVL)最近 120 天,每币每天刷新一次
+  early_log.csv.gz        早期检测(实验)每次触发一行,到期补 72h / 1 周 / 2 周超额与同期全市场基准,永久累积
 """
 from __future__ import annotations
 
@@ -29,7 +37,11 @@ import numpy as np
 import pandas as pd
 import requests
 
+from cryptoradar import early
+from cryptoradar import events as evt
+from cryptoradar import featstore
 from cryptoradar import foresight as fs
+from cryptoradar import fundamentals as fd
 from cryptoradar import opportunity as opp
 from cryptoradar.config import load_config
 from cryptoradar.features import build_features
@@ -47,11 +59,13 @@ MODEL_PATH = Path(__file__).with_name("models") / "opportunity_price.joblib"
 _BUNDLE: dict = {}
 
 
-def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: dict):
-    """72 小时机会模型:波动/回撤/概率。任何一步出错都不能影响主扫描,调用方会兜底。"""
+def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: dict,
+                        rules: dict | None = None):
+    """72 小时机会模型:波动/回撤/概率/方向分。任何一步出错都不能影响主扫描,调用方会兜底。
+    返回 (机会榜, 预测留档, 72h 实盘核对, 已到期留档的 72h/1 周/2 周结果)。"""
     oc = cfg.get("opportunity") or {}
     if oc.get("enabled", True) is False:
-        return None, prev_log, None
+        return None, prev_log, None, None
     path = Path(oc.get("model") or MODEL_PATH)
     if not path.is_absolute():
         path = Path(__file__).with_name(str(path))
@@ -64,10 +78,11 @@ def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: 
     block, R = opp.cloud_opportunity(bundle, done, uni, int(oc.get("topk", 8)), now_ms=now,
                                      min_age_days=float(oc.get("min_age_days", 30)),
                                      young_age_days=float(oc.get("young_age_days", 60)),
-                                     young_dd_mult=float(oc.get("young_dd_mult", 1.3)))
+                                     young_dd_mult=float(oc.get("young_dd_mult", 1.3)), rules=rules)
     log_df = opp.log_snapshot(prev_log, R)
-    live = opp.live_summary(opp.resolve_log(log_df, combined), bundle["models"].thr)
-    return block, log_df, live
+    resolved = opp.resolve_log(log_df, combined, opp.HORIZONS)
+    live = opp.live_summary(resolved, bundle["models"].thr)
+    return block, log_df, live, resolved
 
 
 def now_ms() -> int:
@@ -200,6 +215,12 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         results.append((u, f.iloc[-1], evaluate_last(f, th, rules)))
         frames[u["ccy"]] = f
 
+    if extras is not None:          # 永久特征库(main 里写盘)
+        try:
+            extras["feat_rows"] = featstore.hourly_rows(data, frames, now)
+        except Exception:
+            log.warning("特征库整理失败:%s", traceback.format_exc())
+
     # 历史概率与市场状态(样本 = 本轮拉到的约 37 天 + data 分支里积累的样本库)
     combined = fs.merge_archive(prev_archive, frames)
     labeled = fs.label_frames(combined, th)
@@ -209,6 +230,46 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     mrates = fs.market_rates(mframe) if not mframe.empty else {}
     mstate = fs.market_summary(mframe, mrates)
     preds = list(prev_preds or [])
+
+    # 早期检测(实验):默认不推送,只展示、留档、到期核对。出错不影响主扫描
+    ec = cfg.get("early") or {}
+    early_firing, early_log, early_last = [], (extras or {}).get("prev_early_log"), prev_state.get("early_last", {})
+    early_summary = None
+    # 基本面:每轮在时间预算内刷新最久没更新的币,最新值写到小时表最后一行供检测使用
+    fcfg = cfg.get("fundamentals") or {}
+    fstore, ffeat = (extras or {}).get("prev_fundamentals"), {}
+    if fcfg.get("enabled", True) is not False:
+        try:
+            coins = [u["ccy"] for u in uni if u["ccy"] in frames]
+            fstore = fd.refresh(fstore, coins, float(fcfg.get("budget_seconds", 60)))
+            ffeat = fd.latest(fstore)
+        except Exception:
+            log.warning("基本面刷新失败:%s", traceback.format_exc())
+    # 事件库:只记录和展示,不推送;每轮最多花 events.budget_seconds 秒
+    evc = cfg.get("events") or {}
+    event_tbl, event_state = (extras or {}).get("prev_event_log"), prev_state.get("event_state", {})
+    if evc.get("enabled", True) is not False:
+        try:
+            event_tbl, event_state = evt.refresh(event_tbl, event_state, now, float(evc.get("budget_seconds", 20)))
+        except Exception:
+            log.warning("事件库刷新失败:%s", traceback.format_exc())
+    if extras is not None:
+        extras["event_log"] = event_tbl
+        extras["fundamentals"] = fstore
+        extras["fund_rows"] = featstore.fundamental_rows(ffeat)
+    if ec.get("enabled", True) is not False:
+        try:
+            early_firing, new_rows, early_last = early.cloud_scan(
+                fd.attach_latest(frames, ffeat), uni, early.thresholds(ec.get("thresholds")), now, early_last,
+                float(ec.get("cooldown_hours", 24)))
+            base = early_log if early_log is not None and len(early_log) else None
+            early_log = pd.concat([base, new_rows], ignore_index=True) if base is not None else new_rows
+            early_log = early.resolve(early_log, combined)
+            early_summary = early.summary(early_log)
+        except Exception:
+            log.warning("早期检测失败:%s", traceback.format_exc())
+    if extras is not None:
+        extras["early_log"] = early_log
 
     def outlook(sym: str, fired) -> tuple[str, str | None, dict | None, str]:
         cid, st, scope = fs.pick_outlook([r.id for r in fired], sym, rates)
@@ -249,6 +310,33 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                 rules=[r.id for r in fired], score=score, watch=u["watch"]))
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
+
+    # 早期检测推送(默认关闭)。early.push: false / watchlist(只推自选)/ true;push_detectors 限定推哪几类;
+    # 推送冷却 push_cooldown_hours(默认 7 天)独立于留档冷却:回购、收入这类日频信号一旦加速会连续好几天成立,只在新一轮时推
+    push_mode = ec.get("push", False)
+    push_ids = set(ec.get("push_detectors") or early.DETECTORS_BY_ID)
+    push_cd = float(ec.get("push_cooldown_hours", 168)) * HOUR_MS
+    push_last = dict(prev_state.get("early_push_last", {}))
+    for x in early_firing:
+        if not (push_mode is True or (push_mode == "watchlist" and x["watch"])):
+            continue
+        ids = [d for d in x["detectors"] if d in push_ids and now - int(push_last.get(f"{x['symbol']}|{d}", 0)) > push_cd]
+        if not ids:
+            continue
+        for d in ids:
+            push_last[f"{x['symbol']}|{d}"] = now
+        lines = [f"{x['symbol']} 早期检测(实验):" + "、".join(early.DETECTORS_BY_ID[d].name for d in ids)]
+        fx = ffeat.get(x["symbol"]) or {}
+        if "F_REV_UP" in ids:
+            k = "hrev" if (fx.get("f_hrev_7d") or 0) >= early.thresholds(ec.get("thresholds"))["f_min_usd_7d"] else "rev"
+            nm = "持币人收入(回购/分红)" if k == "hrev" else "协议收入"
+            if fx.get(f"f_{k}_7d") is not None and fx.get(f"f_{k}_ratio") is not None:
+                lines.append(f"- {nm}近 7 天 ${fx[f'f_{k}_7d'] / 1e6:,.2f}M,是之前 4 周周均的 {fx[f'f_{k}_ratio']:.2f} 倍"
+                             f"(DefiLlama,数据到 {fx.get('day')})")
+        new_events.append({"id": f"{now}-{x['symbol']}-early", "ts": now, "type": "early", "symbol": x["symbol"],
+                           "rank": x["rank"], "watch": x["watch"], "detectors": ids, "price": x["price"],
+                           "text": "\n".join(lines)})
+    push_last = {k: v for k, v in push_last.items() if now - v <= max(push_cd, 30 * 24 * HOUR_MS)}
 
     # 价位提醒(穿越时触发一次)
     prices = {u["ccy"]: _num(row.get("close")) for u, row, _ in results}
@@ -319,7 +407,18 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         buybacks.append({"symbol": sym, "annual_usd": _num(annual), "market_cap": mc,
                          "yield": _num(annual / mc) if annual and mc else None,
                          "price": prices.get(sym), "basis": b.get("basis", "")})
-    buybacks.sort(key=lambda x: -(x["yield"] if x["yield"] is not None else -1))
+    # 动态回购:DefiLlama 持币人收入(回购/分红)最近 30 天年化,和最近 7 天相对前 4 周的变化
+    seen = {b["symbol"] for b in buybacks}
+    for sym, x in ffeat.items():
+        if sym not in seen and (x.get("f_hrev_annual") or 0) > 0 and (sym in watch_syms or (x.get("f_hrev_annual") or 0) >= 1e7):
+            buybacks.append({"symbol": sym, "annual_usd": None, "market_cap": _num(mcaps.get(sym)), "yield": None,
+                             "price": prices.get(sym), "basis": ""})
+    for b in buybacks:
+        x = ffeat.get(b["symbol"]) or {}
+        live_annual = x.get("f_hrev_annual")
+        b.update({"live_annual_usd": live_annual, "live_ratio_7d": x.get("f_hrev_ratio"), "live_day": x.get("day"),
+                  "live_yield": _num(live_annual / b["market_cap"]) if live_annual and b.get("market_cap") else None})
+    buybacks.sort(key=lambda x: -(x.get("live_yield") or x.get("yield") or -1))
 
     # 市场红绿灯:状态切换时生成事件,并记入记分卡
     prev_ms = prev_state.get("market_state")
@@ -335,14 +434,17 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                                        (mst or {}).get("n", 0)))
     preds = fs.resolve(preds, combined, mframe, now)
     sc = fs.scorecard(preds, now)
-    opp_block, opp_log, opp_live = None, prev_opp_log, None
+    opp_block, opp_log, opp_live, opp_resolved = None, prev_opp_log, None, None
     try:
-        opp_block, opp_log, opp_live = compute_opportunity(cfg, frames, uni, prev_opp_log, combined)
+        fired_ids = {u["ccy"]: [r.id for r in fired] for u, _, fired in results}
+        opp_block, opp_log, opp_live, opp_resolved = compute_opportunity(cfg, frames, uni, prev_opp_log, combined,
+                                                                         fired_ids)
     except Exception as e:      # 模型出错不能拖垮主扫描
         log.warning("机会模型失败:%s", traceback.format_exc())
         opp_block = {"error": f"{type(e).__name__}: {e}"}
     if extras is not None:
         extras["opp_log"] = opp_log
+        extras["opp_resolved"] = opp_resolved
     archive = fs.archive_table(combined, now)
 
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
@@ -381,12 +483,15 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                        "market": mrates},
         "scorecard": sc,
         "scorecard_text": fs.scorecard_text(sc),
+        "early": {"firing": early_firing, "summary": early_summary},
+        "events_recent": evt.recent_text(event_tbl, now, 48, set(watch_syms)),
         "opportunity": opp_block,
         "opportunity_live": opp_live,
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
-    state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after},
+    state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after}, "early_last": early_last,
+             "early_push_last": push_last, "event_state": event_state,
              "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
              "market_state": mstate.get("state") if mstate else prev_ms}
     return signals, events, state, archive, preds
@@ -415,6 +520,33 @@ def opportunity_md(o: dict, live: dict | None) -> list[str]:
     return lines
 
 
+def direction_md(ds: dict) -> list[str]:
+    """机会榜方向分(P上-P下)的实盘成绩:每 6 小时留档一次,到期后用真实价格核对。"""
+    names = {"72h": "72h", "168h": "1 周", "336h": "2 周"}
+    pc = lambda v, d=1: "—" if v is None else f"{v * 100:+.{d}f}%"
+    pp = lambda v: "—" if v is None else f"{v * 100:.0f}%"
+    tt = lambda v: "—" if v is None else f"{v:+.1f}"
+    lines = ["| 持有期 | 截面数 | 独立区间≈ | IC 均值(t) | 偏涨−偏跌 超额(t) | 偏涨组跑赢比例 / 同期全体 | 偏跌组跑输比例 / 同期全体 |",
+             "|---|---|---|---|---|---|---|"]
+    notes = []
+    for k, st in ds.items():
+        nm = names.get(k, k)
+        if st.get("status") != "ok":
+            notes.append(f"{nm}:{st.get('status')}")
+            continue
+        flag = "(仅供参考)" if (st.get("indep") or 0) < 10 else ""
+        lines.append(f"| {nm}{flag} | {st['n_cross']} | {st.get('indep')} | {st['ic_mean']:+.3f}({tt(st['ic_t'])}) | "
+                     f"{pc(st['spread_mean'])}({tt(st['spread_t'])}) | {pp(st['top_hit'])} / {pp(st['base_up'])} | "
+                     f"{pp(st['bottom_hit'])} / {pp(st['base_dn'])} |")
+    if len(lines) == 2:
+        lines = []
+    lines += [f"- {n}" for n in notes]
+    lines.append("> 方向分 = P上−P下 的截面排名,偏涨/偏跌 = 每次排名的前/后 k 名;收益为剔除 BTC beta 后的超额。"
+                 "t 值已按持有期做 Newey-West 校正;独立区间 = 覆盖时长 / 持有期,小于 10 时结论很不稳。"
+                 "明细见 data 分支 opp_outcomes.csv.gz / opp_direction_daily.csv")
+    return lines
+
+
 def status_md(sig: dict, events: list) -> str:
     m = sig.get("market", {})
     lines = [f"# CryptoRadar 状态 · {sig.get('generated_at_local', '')}", ""]
@@ -429,6 +561,13 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
     if sig.get("opportunity") and not sig["opportunity"].get("error"):
         lines += ["", "## 72 小时机会榜(波动 / 回撤 / 概率)"] + opportunity_md(sig["opportunity"], sig.get("opportunity_live"))
+    if sig.get("events_recent"):
+        lines += ["", "## 事件(近 48 小时首次看到;只记录,不推送)"] + sig["events_recent"]
+    if sig.get("early"):
+        lines += ["", "## 早期检测(实验,默认不推送)"] + early.text(sig["early"].get("firing") or [],
+                                                         sig["early"].get("summary") or {})
+    if sig.get("opportunity_direction"):
+        lines += ["", "## 实盘方向核对(72h / 1 周 / 2 周)"] + direction_md(sig["opportunity_direction"])
     if sig.get("ledger_summary"):
         lines += ["", "## 实盘信号后验表(按规则)"] + fs.ledger_text(sig["ledger_summary"])
     br = sig.get("base_rates") or {}
@@ -455,13 +594,19 @@ def status_md(sig: dict, events: list) -> str:
     if seen:
         lines.append("")
     if sig.get("buybacks"):
-        lines += ["## 回购收益率(年化回购 ÷ 流通市值)"]
+        lines += ["## 回购收益率(年化回购 ÷ 流通市值)",
+                  "| 币 | 手填估算 | 实时(DefiLlama 持币人收入近 30 天年化) | 近 7 天 vs 前 4 周周均 | 市值 | 说明 |",
+                  "|---|---|---|---|---|---|"]
         for b in sig["buybacks"]:
-            y = f"{b['yield'] * 100:.1f}%" if b.get("yield") is not None else "—"
-            amt = f"${b['annual_usd'] / 1e6:,.0f}M/年" if b.get("annual_usd") else "—"
+            y = lambda v: f"{v * 100:.1f}%" if v is not None else "—"
+            usd = lambda v: f"${v / 1e6:,.0f}M/年" if v else "—"
             mc = f"${b['market_cap'] / 1e6:,.0f}M" if b.get("market_cap") else "—"
-            lines.append(f"- {b['symbol']} {y} · 回购 {amt} · 市值 {mc} · {b.get('basis', '')}")
-        lines.append("")
+            r = b.get("live_ratio_7d")
+            lines.append(f"| {b['symbol']} | {y(b.get('yield'))} · {usd(b.get('annual_usd'))} | "
+                         f"{y(b.get('live_yield'))} · {usd(b.get('live_annual_usd'))} | "
+                         f"{'—' if r is None else f'{r:.2f} 倍'} | {mc} | {b.get('basis', '')} |")
+        lines += ["", "> 实时值来自 DefiLlama 的持币人收入(回购、销毁、分红),和手填口径不完全一样;"
+                  "AAVE 等回购不计入持币人收入的协议,实时值会偏低或为空。", ""]
     lines += ["## 正在触发"] + [f["text"] + "\n" for f in sig.get("firing", [])[:20]]
     lines += ["## 最近 24 小时新事件"]
     cut = sig.get("generated_at", 0) - 24 * HOUR_MS
@@ -499,7 +644,20 @@ def main() -> None:
         prev_opp_log = pd.read_csv(prev / "opp_log.csv.gz")
     except Exception:
         prev_opp_log = None
+    try:
+        prev_outcomes = pd.read_csv(prev / "opp_outcomes.csv.gz")
+    except Exception:
+        prev_outcomes = None
     extras: dict = {}
+    try:
+        extras["prev_early_log"] = pd.read_csv(prev / "early_log.csv.gz")
+    except Exception:
+        pass
+    extras["prev_fundamentals"] = load_json(prev / "fundamentals.json", None)
+    try:
+        extras["prev_event_log"] = pd.read_csv(prev / "event_log.csv.gz")
+    except Exception:
+        pass
 
     code = 0
     try:
@@ -520,6 +678,15 @@ def main() -> None:
 
     ledger = fs.update_ledger(prev_ledger, preds)
     signals["ledger_summary"] = fs.ledger_summary(ledger)
+    outcomes = prev_outcomes
+    try:
+        if extras.get("opp_resolved") is not None:
+            outcomes = opp.merge_outcomes(prev_outcomes, extras["opp_resolved"])
+        if outcomes is not None and len(outcomes):
+            signals["opportunity_direction"] = opp.direction_summary(outcomes)
+    except Exception:           # 核对出错不能影响其他输出;保留上一份结果表
+        log.warning("方向核对失败:%s", traceback.format_exc())
+        outcomes = prev_outcomes
     (out / "signals.json").write_text(json.dumps(signals, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "events.json").write_text(json.dumps({"events": events}, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -532,6 +699,28 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    etbl = extras.get("event_log", extras.get("prev_event_log"))
+    if etbl is not None and len(etbl):
+        etbl.to_csv(out / "event_log.csv.gz", index=False)
+    fstore = extras.get("fundamentals", extras.get("prev_fundamentals"))
+    if fstore:
+        (out / "fundamentals.json").write_text(json.dumps(fstore, ensure_ascii=False), encoding="utf-8")
+    elog = extras.get("early_log", extras.get("prev_early_log"))
+    if elog is not None and len(elog):
+        elog.to_csv(out / "early_log.csv.gz", index=False)
+    if outcomes is not None and len(outcomes):
+        outcomes.to_csv(out / "opp_outcomes.csv.gz", index=False)
+        opp.direction_daily(outcomes).to_csv(out / "opp_direction_daily.csv", index=False)
+    # 永久特征库:旧月份原样带过来,只改写有新数据的月份。出错时也必须把旧文件带过来,否则强推 data 分支会删掉历史
+    try:
+        res = featstore.save(prev, out, extras.get("feat_rows"), extras.get("fund_rows"), now_ms())
+        log.info("特征库:%s", res)
+    except Exception:
+        log.warning("特征库写入失败,原样保留旧文件:%s", traceback.format_exc())
+        import shutil
+        for sub in (featstore.FEAT_DIR, featstore.FUND_DIR):
+            if (prev / sub).exists():
+                shutil.copytree(prev / sub, out / sub, dirs_exist_ok=True)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 

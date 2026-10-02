@@ -128,6 +128,11 @@ class OKX:
         return self._get("/api/v5/rubik/stat/taker-volume",
                          {"ccy": ccy, "instType": "CONTRACTS", "period": "1H"}, "rubik")
 
+    def taker_spot(self, ccy: str) -> list[list]:
+        """现货主动买卖量 [ts, 卖量, 买量](单位:币),约最近 30 天每小时。"""
+        return self._get("/api/v5/rubik/stat/taker-volume",
+                         {"ccy": ccy, "instType": "SPOT", "period": "1H"}, "rubik")
+
     def funding_now(self, inst_id: str) -> dict:
         d = self._get("/api/v5/public/funding-rate", {"instId": inst_id})
         return d[0] if d else {}

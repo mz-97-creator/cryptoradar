@@ -45,11 +45,11 @@ jobs:
       - name: 取回上一次的状态
         run: |
           mkdir -p prev
+          # 取回 data 分支上的全部文件(含子目录),不再写死清单:新增的累积文件(结果表、特征库等)才能跨轮保留
           if git fetch --depth=1 origin data 2>/dev/null; then
-            for f in state.json events.json signals.json archive.csv.gz predictions.json ledger.csv opp_log.csv.gz; do
-              git show FETCH_HEAD:$f > prev/$f 2>/dev/null || rm -f prev/$f
-            done
+            git archive FETCH_HEAD | tar -x -C prev
           fi
+          du -sh prev || true
 
       - name: 扫描
         run: python cloud_run.py --config cloud_config.yaml --prev prev --out out

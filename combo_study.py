@@ -48,7 +48,8 @@ def conditions(g: pd.DataFrame) -> dict[str, np.ndarray]:
     c["H2 上涨+持仓费率急升+现货买盘不强"] = c["H2 父:上涨+持仓费率急升"] & (sb <= 0)
     c["H3 父:持仓骤降+下跌"] = (g["oi_z"] <= -1.5) & (ret24 < 0)
     c["H3 持仓骤降+下跌+现货买盘从低位回升"] = c["H3 父:持仓骤降+下跌"] & (sb.shift(12) <= -1) & (dz >= 0.5)
-    c["H4 父:负费率+不再下跌"] = (f <= -1.5) & (ret12 >= 0)
+    # 要求费率本身为负:funding_z 只说明低于该币自己 30 天的均值,不等于负费率
+    c["H4 父:负费率+不再下跌"] = (g["funding"] < 0) & (f <= -1.5) & (ret12 >= 0)
     c["H4 负费率+不再下跌+现货买盘增强"] = c["H4 父:负费率+不再下跌"] & (dz >= 0.5) & (sb >= 0)
     return {k: v.fillna(False).to_numpy() for k, v in c.items()}
 
@@ -84,11 +85,12 @@ def test_events(D: pd.DataFrame, names: list[str], market: pd.Series, h: int) ->
         ev = []
         for _, g in D.groupby("sym"):
             g = g.sort_values("ts")
-            keep, last = [], -10**9
+            # 按真实时间间隔去重:D 已去掉缺标签的行,行号之差不等于小时数
+            ts, keep, last = g["ts"].to_numpy(), [], None
             for p in np.flatnonzero(g[k].to_numpy()):
-                if p - last >= gap:
+                if last is None or ts[p] - last >= gap * 3_600_000:
                     keep.append(p)
-                    last = p
+                    last = ts[p]
             if keep:
                 ev.append(g.iloc[keep])
         if not ev:

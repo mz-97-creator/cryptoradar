@@ -65,11 +65,22 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     f["resid_24h"] = f["ret_24h"] - f["beta"] * f["btc_ret_24h"]
     f["resid_24h_z"] = rolling_z(f["resid_24h"])
     f["ret_1h_z"] = rolling_z(f["ret_1h"])
+    # 早期检测用:6h 超额收益(相对自身 30 天分布)、72h 超额收益、相对 BTC 的对数价格(看是否创新高)
+    f["resid_6h"] = lc.diff(6) - f["beta"] * blc.diff(6)
+    f["resid_6h_z"] = rolling_z(f["resid_6h"])
+    f["resid_72h"] = lc.diff(72) - f["beta"] * blc.diff(72)
+    f["xs_lc"] = lc - blc
 
     oi = df["oi"].ffill(limit=2)
     f["oi"] = oi
     f["oi_chg_24h"] = _safe_log(oi).diff(24)
     f["oi_z"] = rolling_z(f["oi_chg_24h"])
+    # 持仓逐步累积:72h 变化相对自身的 z,以及最近三个 24h 段是否都在增加
+    loi = _safe_log(oi)
+    f["oi_chg_72h"] = loi.diff(72)
+    f["oi_72h_z"] = rolling_z(f["oi_chg_72h"])
+    f["oi_up_days"] = (loi.diff(24) > 0).astype(float) + (loi.diff(24).shift(24) > 0) + (loi.diff(24).shift(48) > 0)
+    f.loc[loi.diff(72).isna(), "oi_up_days"] = np.nan
 
     qv24 = df["quote_volume"].rolling(24, min_periods=20).sum()
     f["vol_24h"] = qv24
@@ -96,6 +107,24 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     f["funding"] = fund
     f["funding_z"] = rolling_z(fund)
 
+    # 现货资金流:云端来自 OKX 现货主动买卖量(币数量);研究时用币安现货 K 线经 spot_features 算出后覆盖
+    if {"spot_buy", "spot_sell"} <= set(df.columns) and df["spot_buy"].notna().any():
+        sp = spot_features(df["spot_buy"], df["spot_sell"], df["quote_volume"] / df["close"])
+        for c in sp:
+            f[c] = sp[c]
+
+    # 独立强势:BTC 下跌的小时里这个币剔除 beta 后的超额(7 日累计,> 0 = 大盘跌时抗跌);
+    # 回调后收复速度:过去 7 日高点到 48 小时内低点的回撤,现在收复了多少(0 = 还在低点,1 = 收复到高点)
+    down = (f["btc_ret_1h"] < 0).astype(float).where(f["btc_ret_1h"].notna())
+    xr = f["ret_1h"] - f["beta"] * f["btc_ret_1h"]
+    f["down_excess_7d"] = (xr * down).rolling(168, min_periods=120).sum()
+    f["down_hours_7d"] = down.rolling(168, min_periods=120).sum()
+    hi7 = lc.rolling(168, min_periods=120).max()
+    lo48 = lc.rolling(48, min_periods=40).min()
+    depth = hi7 - lo48
+    f["pullback_depth"] = np.expm1(depth)
+    f["rebound_48h"] = ((lc - lo48) / depth.where(depth > 0)).clip(0, 1)
+
     rng = (df["high"].rolling(24, min_periods=20).max() - df["low"].rolling(24, min_periods=20).min())
     f["range_24h"] = rng / df["close"]
     f["adr_14d"] = f["range_24h"].rolling(336, min_periods=72).mean()
@@ -108,6 +137,31 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     f["_high"] = df["high"]
     f["_low"] = df["low"]
     return f
+
+
+def spot_features(buy: pd.Series, sell: pd.Series, perp_coin_vol: pd.Series) -> pd.DataFrame:
+    """现货资金流特征(buy / sell = 每小时现货主动买入 / 卖出量,单位一致即可;perp_coin_vol = 合约每小时成交量,同单位)。
+    spot_buy_z      24h 现货主动买入占比的 z(和自己过去 30 天比)
+    spot_buy_dz12   spot_buy_z 12 小时变化
+    lev_share_z     合约 / 现货成交量(对数)的 z:高 = 更多是合约杠杆在交易
+    spot_net72      72h 现货净买入占比 (买 - 卖) / (买 + 卖)
+    spot_net72_z    spot_net72 的 z
+    spot_days_pos   最近三个 24h 段里,净买入占比高于自己 30 天均值的段数(持续性,0~3)"""
+    out = pd.DataFrame(index=buy.index)
+    b24, s24 = buy.rolling(24, min_periods=20).sum(), sell.rolling(24, min_periods=20).sum()
+    v24 = b24 + s24
+    out["spot_buy_z"] = rolling_z(b24 / v24.where(v24 > 0))
+    out["spot_buy_dz12"] = out["spot_buy_z"].diff(12)
+    pv24 = perp_coin_vol.rolling(24, min_periods=20).sum()
+    out["lev_share_z"] = rolling_z(np.log((pv24 / v24).where((pv24 > 0) & (v24 > 0))))
+    b72, s72 = buy.rolling(72, min_periods=60).sum(), sell.rolling(72, min_periods=60).sum()
+    out["spot_net72"] = (b72 - s72) / (b72 + s72).where((b72 + s72) > 0)
+    out["spot_net72_z"] = rolling_z(out["spot_net72"])
+    net24 = (b24 - s24) / v24.where(v24 > 0)
+    m30 = net24.rolling(720, min_periods=168).mean().shift(1)
+    above = (net24 > m30).astype(float).where(net24.notna() & m30.notna())
+    out["spot_days_pos"] = above + above.shift(24) + above.shift(48)
+    return out
 
 
 def add_labels(f: pd.DataFrame, horizons=(24, 72)) -> pd.DataFrame:

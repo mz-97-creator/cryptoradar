@@ -60,11 +60,12 @@ def validate(frames, hits, ids) -> pd.DataFrame:
         ev = []
         for _, g in D.groupby("sym"):
             g = g.sort_values("ts")
-            keep, last = [], -999
+            # 按真实时间间隔去重:D 已去掉缺标签的行,行号之差不等于小时数
+            ts, keep, last = g["ts"].to_numpy(), [], None
             for p in np.flatnonzero(g[i].to_numpy()):
-                if p - last >= 72:
+                if last is None or ts[p] - last >= 72 * 3_600_000:
                     keep.append(p)
-                    last = p
+                    last = ts[p]
             if keep:
                 ev.append(g.iloc[keep])
         if not ev:
