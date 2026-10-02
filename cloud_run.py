@@ -17,6 +17,7 @@
   opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
   features/YYYY-MM.csv.gz      永久特征库:每币每小时的原始输入(K 线、持仓、费率、多空比、主动买卖、现货买卖),首次看到的值
   fundamentals/YYYY-MM.csv.gz  永久基本面库:每币每个数据日的 DefiLlama 特征,首次看到的值和时间
+  event_log.csv.gz        事件库:上新(OKX/币安公告、各交易所交易对清单比对)、HYPE 链上回购,官方时间 + 首次看到的时间,永久累积
   fundamentals.json       DefiLlama 基本面(费用、收入、持币人收入/回购、TVL)最近 120 天,每币每天刷新一次
   early_log.csv.gz        早期检测(实验)每次触发一行,到期补 72h / 1 周 / 2 周超额与同期全市场基准,永久累积
 """
@@ -37,6 +38,7 @@ import pandas as pd
 import requests
 
 from cryptoradar import early
+from cryptoradar import events as evt
 from cryptoradar import featstore
 from cryptoradar import foresight as fs
 from cryptoradar import fundamentals as fd
@@ -243,7 +245,16 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
             ffeat = fd.latest(fstore)
         except Exception:
             log.warning("基本面刷新失败:%s", traceback.format_exc())
+    # 事件库:只记录和展示,不推送;每轮最多花 events.budget_seconds 秒
+    evc = cfg.get("events") or {}
+    event_tbl, event_state = (extras or {}).get("prev_event_log"), prev_state.get("event_state", {})
+    if evc.get("enabled", True) is not False:
+        try:
+            event_tbl, event_state = evt.refresh(event_tbl, event_state, now, float(evc.get("budget_seconds", 20)))
+        except Exception:
+            log.warning("事件库刷新失败:%s", traceback.format_exc())
     if extras is not None:
+        extras["event_log"] = event_tbl
         extras["fundamentals"] = fstore
         extras["fund_rows"] = featstore.fundamental_rows(ffeat)
     if ec.get("enabled", True) is not False:
@@ -473,13 +484,14 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         "scorecard": sc,
         "scorecard_text": fs.scorecard_text(sc),
         "early": {"firing": early_firing, "summary": early_summary},
+        "events_recent": evt.recent_text(event_tbl, now, 48, set(watch_syms)),
         "opportunity": opp_block,
         "opportunity_live": opp_live,
     }
     keep_after = now - 7 * 24 * HOUR_MS
     events = [e for e in prev_events if int(e.get("ts", 0)) >= keep_after] + new_events
     state = {"last_fire": {k: v for k, v in last_fire.items() if v >= keep_after}, "early_last": early_last,
-             "early_push_last": push_last,
+             "early_push_last": push_last, "event_state": event_state,
              "price_alerts": pa_state, "funding_alerts": fa_state, "universe": uni_cache,
              "market_state": mstate.get("state") if mstate else prev_ms}
     return signals, events, state, archive, preds
@@ -549,6 +561,8 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
     if sig.get("opportunity") and not sig["opportunity"].get("error"):
         lines += ["", "## 72 小时机会榜(波动 / 回撤 / 概率)"] + opportunity_md(sig["opportunity"], sig.get("opportunity_live"))
+    if sig.get("events_recent"):
+        lines += ["", "## 事件(近 48 小时首次看到;只记录,不推送)"] + sig["events_recent"]
     if sig.get("early"):
         lines += ["", "## 早期检测(实验,默认不推送)"] + early.text(sig["early"].get("firing") or [],
                                                          sig["early"].get("summary") or {})
@@ -640,6 +654,10 @@ def main() -> None:
     except Exception:
         pass
     extras["prev_fundamentals"] = load_json(prev / "fundamentals.json", None)
+    try:
+        extras["prev_event_log"] = pd.read_csv(prev / "event_log.csv.gz")
+    except Exception:
+        pass
 
     code = 0
     try:
@@ -681,6 +699,9 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    etbl = extras.get("event_log", extras.get("prev_event_log"))
+    if etbl is not None and len(etbl):
+        etbl.to_csv(out / "event_log.csv.gz", index=False)
     fstore = extras.get("fundamentals", extras.get("prev_fundamentals"))
     if fstore:
         (out / "fundamentals.json").write_text(json.dumps(fstore, ensure_ascii=False), encoding="utf-8")

@@ -36,6 +36,11 @@ fundamentals:
   enabled: true
   budget_seconds: 60
 
+# 事件库(cryptoradar/events.py):OKX/币安上新公告、各交易所交易对清单比对、HYPE 链上回购执行。只记录和展示,不推送
+events:
+  enabled: true
+  budget_seconds: 20
+
 # 价位提醒:价格穿越时生成一次事件
 price_alerts:
   - symbol: OP

@@ -107,6 +107,10 @@ def main():
     fake_store = {"mapping": {"OP": {"chain": "Optimism", "protocol": None}}, "mapping_at": _t.time(),
                   "coins": {"OP": {"at": _t.time(), "fees": hrev, "rev": hrev, "hrev": hrev, "tvl": None}}}
     cloud_run.fd.refresh = lambda store, coins, budget_s=60: fake_store
+    # 事件库不联网:每轮固定"看到"一条 OP 现货上新
+    cloud_run.evt.refresh = lambda prev, st, now, budget_s=20: (
+        cloud_run.evt.merge(prev, [{"id": "upbit|OP", "kind": "spot_list", "source": "upbit", "symbol": "OP",
+                                    "event_ts": now, "title": "upbit 新增 OP"}], now), {"listings": {"upbit": ["OP"]}})
     cfg["early"] = {"push": "watchlist", "push_detectors": ["F_REV_UP"], "push_cooldown_hours": 168}
     m = Market(hours=1000)
 
@@ -129,6 +133,9 @@ def main():
     check(len(ee) == 1 and ee[0]["symbol"] == "OP" and ee[0]["detectors"] == ["F_REV_UP"] and "2.00 倍" in ee[0]["text"],
           f"自选币推送回购加速(只推 F_REV_UP):{ee[0]['text'] if ee else None}")
     check(state.get("early_push_last", {}).get("OP|F_REV_UP"), "推送冷却已记录")
+    check(any("OP⭐ 现货上新(upbit)" in x for x in sig["events_recent"]) and "事件(近 48 小时" in cloud_run.status_md(sig, events)
+          and not any(e["type"] == "spot_list" for e in events), "事件库只展示不推送")
+    check(state.get("event_state", {}).get("listings"), "交易对清单写进状态")
     check(sig["watchlist"] and sig["watchlist"][0]["symbol"] == "OP", "自选 OP 在快照里")
     check("USDC" not in {f["symbol"] for f in sig["firing"]}, "稳定币已排除")
     print("\n" + sig["watchlist"][0]["text"] + "\n")

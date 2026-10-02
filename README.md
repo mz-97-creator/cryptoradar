@@ -222,6 +222,21 @@ pip install -r requirements-research.txt                      梯度提升和报
 - 只存原始输入,特征用 `featstore.to_frames` 读回后交给 `features.build_features` 重算即可(测试里验证过一致)。
   约 83 个币每月 2.7 MB。读回:`from cryptoradar import featstore; raw = featstore.load("data 分支目录")`。
 
+## 五点五之五、事件库与事件检验(只记录,不推送)
+
+`cryptoradar/events.py` 每轮最多花 20 秒,把有明确时间(和金额)的事件写进 `data` 分支 `event_log.csv.gz`(永久累积):
+OKX / 币安的上新公告(官方发布时间)、OKX 现货 / 币安现货 / Upbit / Coinbase 交易对清单比对(新出现的交易对)、
+Hyperliquid 援助基金的 HYPE 链上回购成交(按天汇总金额)。每条都有官方时间 `event_ts` 和我们首次看到的时间 `seen_at`。
+解锁时间表目前没有可靠的免费来源,暂缺。`status.md` 的"事件"一节列出近 48 小时首次看到的事件。
+
+`event_study.py` 检验"信息出现时价格是否已经反应":以官方时间为 0 点,看事件前 72h / 24h 和事件后 24h / 72h / 1 周 / 2 周
+相对全市场的超额;HYPE 回购先转成"加速"事件(近 7 天 ≥ 前 4 周周均 1.3 倍)。统计用 `evalkit.py`。
+
+## 五点五之六、统一检验工具 evalkit.py
+
+研究脚本共用:标签窗口多长,训练和检验之间就隔多长;保留集(2026-06-01 之后,新特征的阈值只在开发期上定);
+同一天的事件先合并再做 Newey-West;按 BTC 趋势、市场广度、山寨相对 BTC 分组;全部检验一起做 Holm / BH 多重检验校正。
+
 ## 五点六、实盘信号后验表
 
 云端每次扫描会把推送过的信号追加到 `data` 分支的 `ledger.csv`(永久累积):触发的全部规则、得分、
