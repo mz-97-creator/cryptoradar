@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from cryptoradar import foresight as fs
+from cryptoradar import opportunity as opp_mod
 from cryptoradar import universe
 from cryptoradar.config import DEFAULTS, _merge
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
@@ -150,6 +151,13 @@ def main():
     check(all(set(h) == {"symbol", "reasons"} and h["reasons"] for h in ob["watch_highlights"]), "自选关注项含原因")
     check("机会榜" in cloud_run.status_md(sig, events), "status.md 含机会榜")
     check(sig["opportunity_live"]["resolved"] == 0, "实盘核对:刚上线时无已结算记录")
+    check(sorted(c["dir_rank"] for c in cs_) == list(range(1, len(cs_) + 1))
+          and all(isinstance(c["dir_score"], float) for c in cs_), "每个可评估币带方向分和截面排名(只在可评估币之间排)")
+    ex: dict = {}
+    cloud_run.run(cfg, FakeOKX(m), {}, [], tz, None, None, None, ex)
+    lg0 = ex.get("opp_log")
+    check(lg0 is not None and list(lg0.columns) == opp_mod.LOG_COLS, "预测留档含方向分、排名、档位和触发规则列")
+    check(ex.get("opp_resolved") is not None, "留档核对结果交给 main 累积")
 
     # 样本库:读写一致,且比实时窗口更早的样本会被保留
     tmpa = Path(tempfile.mkdtemp()) / "archive.csv.gz"

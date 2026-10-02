@@ -27,6 +27,7 @@ HOUR = 3_600_000
 GAP = 72                 # 同一代币同一条件,两次事件至少间隔 72 小时
 ARCHIVE_DAYS = 180
 PRED_KEEP_DAYS = 120
+RESOLVE_HORIZONS = (24, 72, 168, 336)    # 预警到期核对:24h / 72h / 1 周 / 2 周
 MIN_N_CALL = 15          # 样本少于这个数,不给方向判断
 EDGE_CALL = 0.08         # 上涨概率比基准高/低 8 个百分点以上,才算有方向
 ARCHIVE_COLS = ["close", "_high", "_low", "_btc_lc", "beta", "ret_24h", "resid_24h_z", "ret_1h_z",
@@ -400,7 +401,7 @@ def resolve(preds: list[dict], combined: dict[str, pd.DataFrame], m: pd.DataFram
     """到期的预测用真实价格核对:收益、相对 BTC 的超额、持有期最大回撤。"""
     btc = combined.get("BTC")
     for p in preds:
-        for h in (24, 72):
+        for h in RESOLVE_HORIZONS:
             key = f"{h}h"
             if key in p["res"] or now < p["t_bar"] + (h + 1) * HOUR:
                 continue
@@ -485,10 +486,11 @@ def scorecard_text(sc: dict) -> str:
 
 # ------------------------------------------------------------------ 信号后验记录表(永久累积)
 # predictions.json 只保留 PRED_KEEP_DAYS 天、且只记主条件;这张表每条推送的信号一行,
-# 含触发的全部规则、得分、24h/72h 的真实收益(原始/相对 BTC)和持有期最大回撤,永不删除,
+# 含触发的全部规则、得分、24h/72h/1 周/2 周的真实收益(原始/相对 BTC)和持有期最大回撤,永不删除,
 # 实盘样本越攒越多,按规则汇总后可以和回测(research.py / tune.py)对照。
 LEDGER_COLS = ["id", "ts", "symbol", "watch", "rules", "score", "price", "call", "pred_up72", "base_up72",
-               "ret24", "resid24", "mae24", "ret72", "resid72", "mae72"]
+               "ret24", "resid24", "mae24", "ret72", "resid72", "mae72",
+               "ret168", "resid168", "mae168", "ret336", "resid336", "mae336"]
 
 
 def load_ledger(path: Path) -> pd.DataFrame | None:
@@ -500,7 +502,7 @@ def load_ledger(path: Path) -> pd.DataFrame | None:
 
 
 def update_ledger(ledger: pd.DataFrame | None, preds: list[dict]) -> pd.DataFrame:
-    """把 signal 类预测并入记录表(按 id 更新:新信号加一行,到期的补上 24h/72h 结果)。"""
+    """把 signal 类预测并入记录表(按 id 更新:新信号加一行,到期的补上 24h/72h/1 周/2 周结果)。"""
     rows = {r["id"]: r for r in ledger.to_dict("records")} if ledger is not None and len(ledger) else {}
     for p in preds:
         if p.get("kind") != "signal":
@@ -510,7 +512,7 @@ def update_ledger(ledger: pd.DataFrame | None, preds: list[dict]) -> pd.DataFram
                   "rules": ";".join(p.get("rules") or [p["cond"]]), "score": p.get("score"),
                   "price": p.get("price"), "call": p.get("call"),
                   "pred_up72": p.get("pred_up72"), "base_up72": p.get("base_up72")})
-        for h in (24, 72):
+        for h in RESOLVE_HORIZONS:
             res = p["res"].get(f"{h}h")
             if res:
                 r[f"ret{h}"] = res["ret"]
@@ -531,7 +533,15 @@ def _row_stats(sub: pd.DataFrame) -> dict | None:
     return {"n": int(len(x)), "resid72_mean": float(x.mean()), "resid72_median": float(x.median()),
             "hit72": float((x > 0).mean()),
             "t72": float(x.mean() / (sd / np.sqrt(len(x)))) if len(x) > 1 and sd > 0 else None,
-            "mae72_p10": p10, "safe_lev": float(1 / abs(p10)) if p10 and p10 < 0 else None}
+            "mae72_p10": p10, "safe_lev": float(1 / abs(p10)) if p10 and p10 < 0 else None,
+            **{k: v for h in (168, 336) for k, v in _long_stats(sub, h).items()}}
+
+
+def _long_stats(sub: pd.DataFrame, h: int) -> dict:
+    """1 周 / 2 周的到期数、超额中位、跑赢 BTC 的比例。同一规则的信号持有期大段重叠,不给 t 值。"""
+    x = sub[f"resid{h}"].dropna() if f"resid{h}" in sub else pd.Series(dtype=float)
+    return {f"n{h}": int(len(x)), f"resid{h}_median": float(x.median()) if len(x) else None,
+            f"hit{h}": float((x > 0).mean()) if len(x) else None}
 
 
 def ledger_summary(ledger: pd.DataFrame | None) -> dict:
@@ -555,11 +565,15 @@ def ledger_text(ls: dict, min_n: int = 30) -> list[str]:
         return ["实盘还没有到期的信号,72 小时后开始累积"]
     lines = [f"累计推送 {ls['total']} 条信号,已到期 {ls['resolved']} 条(每条 72h 后结算;样本 < {min_n} 的结论不可靠)"]
     if ls.get("by_rule"):
-        lines += ["| 规则 | 到期数 | 72h 超额中位 | 上涨比例 | t | safe_lev |", "|---|---|---|---|---|---|"]
+        lines += ["| 规则 | 到期数 | 72h 超额中位 | 上涨比例 | t | safe_lev | 1周 超额中位(跑赢比例,到期数) | 2周 超额中位(跑赢比例,到期数) |",
+                  "|---|---|---|---|---|---|---|---|"]
+        long = lambda st, h: ("—" if not st.get(f"n{h}") else
+                              f"{_p(st[f'resid{h}_median'], 1)}({_pp(st[f'hit{h}'])},{st[f'n{h}']})")
         for rid, st in sorted(ls["by_rule"].items(), key=lambda kv: -kv[1]["n"]):
             name = RULES_BY_ID[rid].name if rid in RULES_BY_ID else rid
             t = "—" if st["t72"] is None else f"{st['t72']:+.1f}"
             lev = "—" if st["safe_lev"] is None else f"{st['safe_lev']:.1f}x"
             flag = "" if st["n"] >= min_n else "(样本少)"
-            lines.append(f"| {name}{flag} | {st['n']} | {_p(st['resid72_median'], 1)} | {_pp(st['hit72'])} | {t} | {lev} |")
+            lines.append(f"| {name}{flag} | {st['n']} | {_p(st['resid72_median'], 1)} | {_pp(st['hit72'])} | {t} | {lev} | "
+                         f"{long(st, 168)} | {long(st, 336)} |")
     return lines

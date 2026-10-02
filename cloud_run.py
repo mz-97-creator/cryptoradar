@@ -11,7 +11,10 @@
   status.md     方便在 GitHub 网页上直接查看的中文摘要
   archive.csv.gz   全市场小时特征样本库(最近 180 天),历史概率用,随时间增长
   predictions.json 每条预警当时的历史概率和到期后的真实结果(记分卡)
-  ledger.csv    信号后验记录表:每条推送的信号一行(规则、得分、24h/72h 真实收益与回撤),永久累积
+  ledger.csv    信号后验记录表:每条推送的信号一行(规则、得分、24h/72h/1 周/2 周真实收益与回撤),永久累积
+  opp_log.csv.gz          机会榜预测留档(每 6 小时一次,含方向分与截面排名,保留 120 天)
+  opp_outcomes.csv.gz     机会榜预测的实盘结果:72h / 1 周 / 2 周超额收益与不利变动,永久累积
+  opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
 """
 from __future__ import annotations
 
@@ -47,11 +50,13 @@ MODEL_PATH = Path(__file__).with_name("models") / "opportunity_price.joblib"
 _BUNDLE: dict = {}
 
 
-def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: dict):
-    """72 小时机会模型:波动/回撤/概率。任何一步出错都不能影响主扫描,调用方会兜底。"""
+def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: dict,
+                        rules: dict | None = None):
+    """72 小时机会模型:波动/回撤/概率/方向分。任何一步出错都不能影响主扫描,调用方会兜底。
+    返回 (机会榜, 预测留档, 72h 实盘核对, 已到期留档的 72h/1 周/2 周结果)。"""
     oc = cfg.get("opportunity") or {}
     if oc.get("enabled", True) is False:
-        return None, prev_log, None
+        return None, prev_log, None, None
     path = Path(oc.get("model") or MODEL_PATH)
     if not path.is_absolute():
         path = Path(__file__).with_name(str(path))
@@ -64,10 +69,11 @@ def compute_opportunity(cfg: dict, frames: dict, uni: list, prev_log, combined: 
     block, R = opp.cloud_opportunity(bundle, done, uni, int(oc.get("topk", 8)), now_ms=now,
                                      min_age_days=float(oc.get("min_age_days", 30)),
                                      young_age_days=float(oc.get("young_age_days", 60)),
-                                     young_dd_mult=float(oc.get("young_dd_mult", 1.3)))
+                                     young_dd_mult=float(oc.get("young_dd_mult", 1.3)), rules=rules)
     log_df = opp.log_snapshot(prev_log, R)
-    live = opp.live_summary(opp.resolve_log(log_df, combined), bundle["models"].thr)
-    return block, log_df, live
+    resolved = opp.resolve_log(log_df, combined, opp.HORIZONS)
+    live = opp.live_summary(resolved, bundle["models"].thr)
+    return block, log_df, live, resolved
 
 
 def now_ms() -> int:
@@ -335,14 +341,17 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                                        (mst or {}).get("n", 0)))
     preds = fs.resolve(preds, combined, mframe, now)
     sc = fs.scorecard(preds, now)
-    opp_block, opp_log, opp_live = None, prev_opp_log, None
+    opp_block, opp_log, opp_live, opp_resolved = None, prev_opp_log, None, None
     try:
-        opp_block, opp_log, opp_live = compute_opportunity(cfg, frames, uni, prev_opp_log, combined)
+        fired_ids = {u["ccy"]: [r.id for r in fired] for u, _, fired in results}
+        opp_block, opp_log, opp_live, opp_resolved = compute_opportunity(cfg, frames, uni, prev_opp_log, combined,
+                                                                         fired_ids)
     except Exception as e:      # 模型出错不能拖垮主扫描
         log.warning("机会模型失败:%s", traceback.format_exc())
         opp_block = {"error": f"{type(e).__name__}: {e}"}
     if extras is not None:
         extras["opp_log"] = opp_log
+        extras["opp_resolved"] = opp_resolved
     archive = fs.archive_table(combined, now)
 
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
@@ -415,6 +424,33 @@ def opportunity_md(o: dict, live: dict | None) -> list[str]:
     return lines
 
 
+def direction_md(ds: dict) -> list[str]:
+    """机会榜方向分(P上-P下)的实盘成绩:每 6 小时留档一次,到期后用真实价格核对。"""
+    names = {"72h": "72h", "168h": "1 周", "336h": "2 周"}
+    pc = lambda v, d=1: "—" if v is None else f"{v * 100:+.{d}f}%"
+    pp = lambda v: "—" if v is None else f"{v * 100:.0f}%"
+    tt = lambda v: "—" if v is None else f"{v:+.1f}"
+    lines = ["| 持有期 | 截面数 | 独立区间≈ | IC 均值(t) | 偏涨−偏跌 超额(t) | 偏涨组跑赢比例 / 同期全体 | 偏跌组跑输比例 / 同期全体 |",
+             "|---|---|---|---|---|---|---|"]
+    notes = []
+    for k, st in ds.items():
+        nm = names.get(k, k)
+        if st.get("status") != "ok":
+            notes.append(f"{nm}:{st.get('status')}")
+            continue
+        flag = "(仅供参考)" if (st.get("indep") or 0) < 10 else ""
+        lines.append(f"| {nm}{flag} | {st['n_cross']} | {st.get('indep')} | {st['ic_mean']:+.3f}({tt(st['ic_t'])}) | "
+                     f"{pc(st['spread_mean'])}({tt(st['spread_t'])}) | {pp(st['top_hit'])} / {pp(st['base_up'])} | "
+                     f"{pp(st['bottom_hit'])} / {pp(st['base_dn'])} |")
+    if len(lines) == 2:
+        lines = []
+    lines += [f"- {n}" for n in notes]
+    lines.append("> 方向分 = P上−P下 的截面排名,偏涨/偏跌 = 每次排名的前/后 k 名;收益为剔除 BTC beta 后的超额。"
+                 "t 值已按持有期做 Newey-West 校正;独立区间 = 覆盖时长 / 持有期,小于 10 时结论很不稳。"
+                 "明细见 data 分支 opp_outcomes.csv.gz / opp_direction_daily.csv")
+    return lines
+
+
 def status_md(sig: dict, events: list) -> str:
     m = sig.get("market", {})
     lines = [f"# CryptoRadar 状态 · {sig.get('generated_at_local', '')}", ""]
@@ -429,6 +465,8 @@ def status_md(sig: dict, events: list) -> str:
         lines += ["", "## 预警记分卡", sig["scorecard_text"]]
     if sig.get("opportunity") and not sig["opportunity"].get("error"):
         lines += ["", "## 72 小时机会榜(波动 / 回撤 / 概率)"] + opportunity_md(sig["opportunity"], sig.get("opportunity_live"))
+    if sig.get("opportunity_direction"):
+        lines += ["", "## 实盘方向核对(72h / 1 周 / 2 周)"] + direction_md(sig["opportunity_direction"])
     if sig.get("ledger_summary"):
         lines += ["", "## 实盘信号后验表(按规则)"] + fs.ledger_text(sig["ledger_summary"])
     br = sig.get("base_rates") or {}
@@ -499,6 +537,10 @@ def main() -> None:
         prev_opp_log = pd.read_csv(prev / "opp_log.csv.gz")
     except Exception:
         prev_opp_log = None
+    try:
+        prev_outcomes = pd.read_csv(prev / "opp_outcomes.csv.gz")
+    except Exception:
+        prev_outcomes = None
     extras: dict = {}
 
     code = 0
@@ -520,6 +562,15 @@ def main() -> None:
 
     ledger = fs.update_ledger(prev_ledger, preds)
     signals["ledger_summary"] = fs.ledger_summary(ledger)
+    outcomes = prev_outcomes
+    try:
+        if extras.get("opp_resolved") is not None:
+            outcomes = opp.merge_outcomes(prev_outcomes, extras["opp_resolved"])
+        if outcomes is not None and len(outcomes):
+            signals["opportunity_direction"] = opp.direction_summary(outcomes)
+    except Exception:           # 核对出错不能影响其他输出;保留上一份结果表
+        log.warning("方向核对失败:%s", traceback.format_exc())
+        outcomes = prev_outcomes
     (out / "signals.json").write_text(json.dumps(signals, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "events.json").write_text(json.dumps({"events": events}, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -532,6 +583,9 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    if outcomes is not None and len(outcomes):
+        outcomes.to_csv(out / "opp_outcomes.csv.gz", index=False)
+        opp.direction_daily(outcomes).to_csv(out / "opp_direction_daily.csv", index=False)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 
