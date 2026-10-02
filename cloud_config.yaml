@@ -27,6 +27,12 @@ early:
   cooldown_hours: 24      # 同一币同一检测 24 小时内只留档一次
   thresholds: {}          # 不写用默认值,见 early.DEFAULTS
 
+# 基本面(DefiLlama,免费):每轮最多花 budget_seconds 秒刷新最久没更新的币,每币每天一次,结果存 data 分支 fundamentals.json。
+# 供早期检测 F_REV_UP / F_FEES_UP / F_TVL_UP 和回购收益率的实时值使用
+fundamentals:
+  enabled: true
+  budget_seconds: 60
+
 # 价位提醒:价格穿越时生成一次事件
 price_alerts:
   - symbol: OP

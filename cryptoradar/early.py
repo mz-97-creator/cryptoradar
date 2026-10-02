@@ -8,6 +8,11 @@ lag_study.py 的结论:现有规则里 OI_TREND / RESID / VOL 多在涨幅过半
               用的是绝对位置和排名,不是相对自身波动的 z,慢慢涨上去的也能抓到;同时 24h 没有急拉(那是 RESID 的事)
   E_OI_BUILD  持仓逐步累积:72h 持仓变化相对自身 z ≥ 1.5,最近三个 24h 段持仓都在增加,但 24h 没有单次激增,价格还没大动
   E_SQUEEZE   空头挤压前兆:价格在涨(24h 超额 z ≥ 1 且 24h 收益为正),资金费率仍为负(空头在付费、还没认输)
+  S_SPOT_LED  现货买盘主导:现货主动买入占比明显高于平时且还在上升,合约成交占比不高,价格还没大动
+  F_REV_UP    回购/协议收入加速:持币人收入(没有则看协议收入)最近 7 日 ≥ 之前 4 周周均的 1.3 倍
+  F_FEES_UP   协议费用(使用量)加速:同上,看总费用
+  F_TVL_UP    TVL 7 日增长 ≥ 10%
+  基本面(F_*)来自 cryptoradar/fundamentals.py(DefiLlama,日频),现货(S_*)来自 OKX 现货主动买卖量 / 币安现货 K 线。
 
 这些检测在验证有效之前默认不推送,只写进 status.md / signals.json 并留档,到期用 72h / 1 周 / 2 周的实盘结果核对。
 """
@@ -31,6 +36,12 @@ DEFAULTS = {
     "oi24_cap": 2.0,          # E_OI_BUILD:24h 持仓 z 低于它(不是单次激增)
     "oi_build_ret_cap": 0.05, # E_OI_BUILD:72h 超额收益绝对值低于它(价格还没大动)
     "squeeze_resid_z": 1.0,   # E_SQUEEZE:24h 超额 z
+    "spot_buy_z": 1.5,        # S_SPOT_LED:现货主动买入占比 z
+    "spot_buy_rise": 0.5,     # S_SPOT_LED:比 12 小时前上升
+    "lev_share_max": 0.0,     # S_SPOT_LED:合约/现货成交量 z 不高于它(现货占比高于平时)
+    "f_ratio": 1.3,           # F_*:最近 7 日 / 之前 28 日周均值
+    "f_min_usd_7d": 50_000,   # F_REV_UP / F_FEES_UP:最近 7 日至少这么多美元,太小的不看
+    "f_tvl_7d": 0.10,         # F_TVL_UP:TVL 7 日对数变化
 }
 
 
@@ -58,6 +69,27 @@ DETECTORS = [
     Detector("E_SQUEEZE", "价格上涨但费率仍为负",
              lambda f, t: (_c(f, "funding") < 0) & (_c(f, "resid_24h_z") >= t["squeeze_resid_z"])
              & (_c(f, "ret_24h") > 0)),
+]
+
+
+def _rev_up(f: pd.DataFrame, t: dict) -> pd.Series:
+    """持币人收入(回购/分红)加速;没有持币人收入数据的协议看协议收入。"""
+    h7, r7 = _c(f, "f_hrev_7d"), _c(f, "f_rev_7d")
+    has_h = h7 >= t["f_min_usd_7d"]
+    up_h = has_h & (_c(f, "f_hrev_ratio") >= t["f_ratio"])
+    up_r = ~has_h & (r7 >= t["f_min_usd_7d"]) & (_c(f, "f_rev_ratio") >= t["f_ratio"])
+    return up_h | up_r
+
+
+DETECTORS += [
+    Detector("S_SPOT_LED", "现货买盘主导走强",
+             lambda f, t: (_c(f, "spot_buy_z") >= t["spot_buy_z"]) & (_c(f, "spot_buy_dz12") >= t["spot_buy_rise"])
+             & (_c(f, "lev_share_z") <= t["lev_share_max"]) & (_c(f, "resid_24h_z") < t["resid24_cap"])
+             & (_c(f, "resid_24h_z") > -1)),
+    Detector("F_REV_UP", "回购/协议收入加速", _rev_up),
+    Detector("F_FEES_UP", "协议费用(使用量)加速",
+             lambda f, t: (_c(f, "f_fees_7d") >= t["f_min_usd_7d"]) & (_c(f, "f_fees_ratio") >= t["f_ratio"])),
+    Detector("F_TVL_UP", "TVL 明显增长", lambda f, t: _c(f, "f_tvl_chg_7d") >= t["f_tvl_7d"]),
 ]
 DETECTORS_BY_ID = {d.id: d for d in DETECTORS}
 

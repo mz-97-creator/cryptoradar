@@ -100,6 +100,13 @@ def main():
                                                {"symbol": "OP", "below": -1.0}],
                             "buybacks": [{"symbol": "OP", "annual_eth": 100}, {"symbol": "SOL", "annual_usd": 5e6}]})
     tz = ZoneInfo("Asia/Singapore")
+    # 基本面不联网:OP 的持币人收入最近 7 天翻倍(回购加速),其余币没有对应协议
+    import time as _t
+    day0 = int(_t.time()) // 86400 * 86400
+    hrev = {str(day0 - k * 86400): (200_000.0 if k <= 7 else 100_000.0) for k in range(60)}
+    fake_store = {"mapping": {"OP": {"chain": "Optimism", "protocol": None}}, "mapping_at": _t.time(),
+                  "coins": {"OP": {"at": _t.time(), "fees": hrev, "rev": hrev, "hrev": hrev, "tvl": None}}}
+    cloud_run.fd.refresh = lambda store, coins, budget_s=60: fake_store
     m = Market(hours=1000)
 
     print("\n[1] 第一轮")
@@ -113,6 +120,10 @@ def main():
     check(len(sig["funding_levels"]) == 2, "资金费率阈值写入快照")
     bb = {b["symbol"]: b for b in sig["buybacks"]}
     check(bb["OP"]["yield"] and bb["SOL"]["yield"], f"回购收益率:{ {k: round(v['yield'], 4) for k, v in bb.items()} }")
+    check(abs(bb["OP"]["live_annual_usd"] - (7 * 200_000 + 23 * 100_000) * 365 / 30) < 1
+          and abs(bb["OP"]["live_ratio_7d"] - 2.0) < 1e-9, f"实时回购:年化 {bb['OP']['live_annual_usd']:,.0f},7 日加速 {bb['OP']['live_ratio_7d']}")
+    ef = {x["symbol"]: x for x in sig["early"]["firing"]}
+    check("OP" in ef and {"F_REV_UP", "F_FEES_UP"} <= set(ef["OP"]["detectors"]), f"基本面检测触发:{ef.get('OP')}")
     check(sig["watchlist"] and sig["watchlist"][0]["symbol"] == "OP", "自选 OP 在快照里")
     check("USDC" not in {f["symbol"] for f in sig["firing"]}, "稳定币已排除")
     print("\n" + sig["watchlist"][0]["text"] + "\n")

@@ -15,6 +15,7 @@
   opp_log.csv.gz          机会榜预测留档(每 6 小时一次,含方向分与截面排名,保留 120 天)
   opp_outcomes.csv.gz     机会榜预测的实盘结果:72h / 1 周 / 2 周超额收益与不利变动,永久累积
   opp_direction_daily.csv 按天汇总的实盘方向成绩(IC、偏涨减偏跌、命中率 vs 同期基准)
+  fundamentals.json       DefiLlama 基本面(费用、收入、持币人收入/回购、TVL)最近 120 天,每币每天刷新一次
   early_log.csv.gz        早期检测(实验)每次触发一行,到期补 72h / 1 周 / 2 周超额与同期全市场基准,永久累积
 """
 from __future__ import annotations
@@ -35,6 +36,7 @@ import requests
 
 from cryptoradar import early
 from cryptoradar import foresight as fs
+from cryptoradar import fundamentals as fd
 from cryptoradar import opportunity as opp
 from cryptoradar.config import load_config
 from cryptoradar.features import build_features
@@ -222,10 +224,23 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     ec = cfg.get("early") or {}
     early_firing, early_log, early_last = [], (extras or {}).get("prev_early_log"), prev_state.get("early_last", {})
     early_summary = None
+    # 基本面:每轮在时间预算内刷新最久没更新的币,最新值写到小时表最后一行供检测使用
+    fcfg = cfg.get("fundamentals") or {}
+    fstore, ffeat = (extras or {}).get("prev_fundamentals"), {}
+    if fcfg.get("enabled", True) is not False:
+        try:
+            coins = [u["ccy"] for u in uni if u["ccy"] in frames]
+            fstore = fd.refresh(fstore, coins, float(fcfg.get("budget_seconds", 60)))
+            ffeat = fd.latest(fstore)
+        except Exception:
+            log.warning("基本面刷新失败:%s", traceback.format_exc())
+    if extras is not None:
+        extras["fundamentals"] = fstore
     if ec.get("enabled", True) is not False:
         try:
             early_firing, new_rows, early_last = early.cloud_scan(
-                frames, uni, early.thresholds(ec.get("thresholds")), now, early_last, float(ec.get("cooldown_hours", 24)))
+                fd.attach_latest(frames, ffeat), uni, early.thresholds(ec.get("thresholds")), now, early_last,
+                float(ec.get("cooldown_hours", 24)))
             base = early_log if early_log is not None and len(early_log) else None
             early_log = pd.concat([base, new_rows], ignore_index=True) if base is not None else new_rows
             early_log = early.resolve(early_log, combined)
@@ -352,7 +367,18 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         buybacks.append({"symbol": sym, "annual_usd": _num(annual), "market_cap": mc,
                          "yield": _num(annual / mc) if annual and mc else None,
                          "price": prices.get(sym), "basis": b.get("basis", "")})
-    buybacks.sort(key=lambda x: -(x["yield"] if x["yield"] is not None else -1))
+    # 动态回购:DefiLlama 持币人收入(回购/分红)最近 30 天年化,和最近 7 天相对前 4 周的变化
+    seen = {b["symbol"] for b in buybacks}
+    for sym, x in ffeat.items():
+        if sym not in seen and (x.get("f_hrev_annual") or 0) > 0 and (sym in watch_syms or (x.get("f_hrev_annual") or 0) >= 1e7):
+            buybacks.append({"symbol": sym, "annual_usd": None, "market_cap": _num(mcaps.get(sym)), "yield": None,
+                             "price": prices.get(sym), "basis": ""})
+    for b in buybacks:
+        x = ffeat.get(b["symbol"]) or {}
+        live_annual = x.get("f_hrev_annual")
+        b.update({"live_annual_usd": live_annual, "live_ratio_7d": x.get("f_hrev_ratio"), "live_day": x.get("day"),
+                  "live_yield": _num(live_annual / b["market_cap"]) if live_annual and b.get("market_cap") else None})
+    buybacks.sort(key=lambda x: -(x.get("live_yield") or x.get("yield") or -1))
 
     # 市场红绿灯:状态切换时生成事件,并记入记分卡
     prev_ms = prev_state.get("market_state")
@@ -524,13 +550,19 @@ def status_md(sig: dict, events: list) -> str:
     if seen:
         lines.append("")
     if sig.get("buybacks"):
-        lines += ["## 回购收益率(年化回购 ÷ 流通市值)"]
+        lines += ["## 回购收益率(年化回购 ÷ 流通市值)",
+                  "| 币 | 手填估算 | 实时(DefiLlama 持币人收入近 30 天年化) | 近 7 天 vs 前 4 周周均 | 市值 | 说明 |",
+                  "|---|---|---|---|---|---|"]
         for b in sig["buybacks"]:
-            y = f"{b['yield'] * 100:.1f}%" if b.get("yield") is not None else "—"
-            amt = f"${b['annual_usd'] / 1e6:,.0f}M/年" if b.get("annual_usd") else "—"
+            y = lambda v: f"{v * 100:.1f}%" if v is not None else "—"
+            usd = lambda v: f"${v / 1e6:,.0f}M/年" if v else "—"
             mc = f"${b['market_cap'] / 1e6:,.0f}M" if b.get("market_cap") else "—"
-            lines.append(f"- {b['symbol']} {y} · 回购 {amt} · 市值 {mc} · {b.get('basis', '')}")
-        lines.append("")
+            r = b.get("live_ratio_7d")
+            lines.append(f"| {b['symbol']} | {y(b.get('yield'))} · {usd(b.get('annual_usd'))} | "
+                         f"{y(b.get('live_yield'))} · {usd(b.get('live_annual_usd'))} | "
+                         f"{'—' if r is None else f'{r:.2f} 倍'} | {mc} | {b.get('basis', '')} |")
+        lines += ["", "> 实时值来自 DefiLlama 的持币人收入(回购、销毁、分红),和手填口径不完全一样;"
+                  "AAVE 等回购不计入持币人收入的协议,实时值会偏低或为空。", ""]
     lines += ["## 正在触发"] + [f["text"] + "\n" for f in sig.get("firing", [])[:20]]
     lines += ["## 最近 24 小时新事件"]
     cut = sig.get("generated_at", 0) - 24 * HOUR_MS
@@ -577,6 +609,7 @@ def main() -> None:
         extras["prev_early_log"] = pd.read_csv(prev / "early_log.csv.gz")
     except Exception:
         pass
+    extras["prev_fundamentals"] = load_json(prev / "fundamentals.json", None)
 
     code = 0
     try:
@@ -618,6 +651,9 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    fstore = extras.get("fundamentals", extras.get("prev_fundamentals"))
+    if fstore:
+        (out / "fundamentals.json").write_text(json.dumps(fstore, ensure_ascii=False), encoding="utf-8")
     elog = extras.get("early_log", extras.get("prev_early_log"))
     if elog is not None and len(elog):
         elog.to_csv(out / "early_log.csv.gz", index=False)

@@ -107,6 +107,16 @@ def build_features(df: pd.DataFrame, btc: pd.DataFrame, funding: pd.Series | Non
     f["funding"] = fund
     f["funding_z"] = rolling_z(fund)
 
+    # 现货资金流(定义同 spotflow.py):现货主动买入占比的 z、它 12 小时的变化、合约成交量 / 现货成交量的 z。
+    # 云端来自 OKX 现货主动买卖量(币数量),研究时由 spotflow.features 从币安现货 K 线算出后覆盖
+    if {"spot_buy", "spot_sell"} <= set(df.columns) and df["spot_buy"].notna().any():
+        sb24 = df["spot_buy"].rolling(24, min_periods=20).sum()
+        sv24 = sb24 + df["spot_sell"].rolling(24, min_periods=20).sum()
+        f["spot_buy_z"] = rolling_z(sb24 / sv24.where(sv24 > 0))
+        f["spot_buy_dz12"] = f["spot_buy_z"].diff(12)
+        perp_coin24 = (df["quote_volume"] / df["close"]).rolling(24, min_periods=20).sum()
+        f["lev_share_z"] = rolling_z(np.log((perp_coin24 / sv24).where((perp_coin24 > 0) & (sv24 > 0))))
+
     rng = (df["high"].rolling(24, min_periods=20).max() - df["low"].rolling(24, min_periods=20).min())
     f["range_24h"] = rng / df["close"]
     f["adr_14d"] = f["range_24h"].rolling(336, min_periods=72).mean()
