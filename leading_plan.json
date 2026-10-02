@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "locked_on_utc": "2026-10-02",
+  "symbols": ["BTC", "ETH", "SOL", "XRP", "OP", "ARB", "AAVE", "UNI", "LINK", "HYPE", "PUMP"],
+  "history_start_utc": "2025-10-01",
+  "final_test_start_utc": "2026-07-01",
+  "development_fold_starts_utc": ["2026-03-01", "2026-04-01", "2026-05-01", "2026-06-01"],
+  "horizon_h": 168,
+  "take_profit": 0.20,
+  "stop_loss": 0.10,
+  "cost_per_side": 0.001,
+  "startup_return": 0.05,
+  "decision_stride_h": 24,
+  "decision_weekdays_utc": [0, 1, 2, 3, 4],
+  "max_alerts_per_decision": 1,
+  "max_prior_24h_return": 0.05,
+  "embargo_h": 24,
+  "bootstrap_block_days": 14,
+  "bootstrap_repetitions": 1000,
+  "model_probability_floor": 0.15,
+  "arms": ["momentum_baseline", "logistic_strength", "tree_strength", "tree_strength_spot"],
+  "notes": [
+    "固定候选名单,不是全市场结果;当前存续币筛选存在幸存者偏差。",
+    "历史 OHLC 是事后下载的重建行情,不是当时已经归档的实盘预测。",
+    "现货主动买卖数据若训练区间覆盖不足,对应模型必须跳过,不得将缺失填零后声称增量。",
+    "最终检验各模型只报告预先登记结果,不据此重新调参;再改方法需要新的检验数据。",
+    "固定每个 UTC 工作日 00:00 一个决策,最多一条,周内不看未来排名。"
+  ]
+}

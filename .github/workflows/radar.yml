@@ -15,7 +15,7 @@ jobs:
   research:
     if: github.ref == 'refs/heads/codex/research-v1'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-research.txt
       - name: Test research labels and alert settlement
-        run: python -m unittest tests.test_research_integrity
+        run: python -m unittest tests.test_research_integrity tests.test_leading
       - name: Restore the last successful Codex snapshot
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,6 +37,11 @@ jobs:
           fi
       - name: Scan into isolated research files
         run: python cloud_run.py --config codex_config.yaml --prev prev --out out
+      - name: Collect leading sources and run locked time study
+        run: |
+          python leading_collect.py --plan leading_plan.json --out prev/leading_data --workers 3
+          python leading_study.py --plan leading_plan.json --data prev/leading_data --out out/leading_research
+          cp -r prev/leading_data out/leading_data
       - name: Reject stale or failed snapshots
         run: |
           python - <<'PYCODE'

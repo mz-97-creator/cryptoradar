@@ -29,20 +29,26 @@ class BarrierSpec:
             raise ValueError("Invalid cost")
 
 
-def label_bars(bars: pd.DataFrame, spec: BarrierSpec = BarrierSpec()) -> pd.DataFrame:
+def label_bars(bars: pd.DataFrame, spec: BarrierSpec = BarrierSpec(), decision_stride_h: int = 1,
+               startup_return: float = 0.05) -> pd.DataFrame:
     required = {"open", "high", "low", "close"}
     if not required <= set(bars):
         raise ValueError("OHLC columns are required")
     if not bars.index.is_monotonic_increasing or not bars.index.is_unique:
         raise ValueError("Bars must have sorted, unique timestamps")
+    if decision_stride_h < 1 or startup_return <= 0:
+        raise ValueError("Invalid decision stride or startup return")
     ts = bars.index.to_numpy(dtype=np.int64)
     ohlc = bars[["open", "high", "low", "close"]].to_numpy(float)
     rows = []
     for i, feature_ts in enumerate(ts):
         entry_ts = int(feature_ts + HOUR)
+        if (entry_ts // HOUR) % decision_stride_h:
+            continue
         r = {"feature_ts": int(feature_ts), "entry_ts": entry_ts,
              "label_end_ts": None, "outcome": "censored", "target": np.nan,
-             "entry_price": np.nan, "exit_price": np.nan, "net_return": np.nan}
+             "entry_price": np.nan, "exit_price": np.nan, "net_return": np.nan,
+             "startup_earliest_ts": None, "startup_latest_ts": None}
         if i + 1 >= len(ts) or ts[i + 1] != entry_ts:
             rows.append(r)
             continue
@@ -60,6 +66,9 @@ def label_bars(bars: pd.DataFrame, spec: BarrierSpec = BarrierSpec()) -> pd.Data
             op, hi, lo, cl = ohlc[j]
             if not np.isfinite(ohlc[j]).all() or lo <= 0 or not lo <= min(op, cl) <= max(op, cl) <= hi:
                 break
+            if r["startup_earliest_ts"] is None and hi >= entry * (1 + startup_return):
+                r["startup_earliest_ts"] = int(ts[j])
+                r["startup_latest_ts"] = int(ts[j] if op >= entry * (1 + startup_return) else ts[j] + HOUR)
             outcome, exit_price = None, None
             # Opening gaps have known ordering and may execute worse than stop.
             if op <= lower:

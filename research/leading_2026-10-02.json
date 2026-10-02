@@ -1,0 +1,549 @@
+{
+  "development": {
+    "momentum_baseline": {
+      "status": "evaluated",
+      "alerts": 82,
+      "resolved": 82,
+      "successes": 10,
+      "positive_candidate_rows": 52,
+      "candidate_row_recall": 0.19230769230769232,
+      "unknown_outcomes": 0,
+      "decision_days": 82,
+      "precision": 0.12195121951219512,
+      "precision_lower": 0.12195121951219512,
+      "precision_upper": 0.12195121951219512,
+      "candidate_base_rate": 0.06961178045515395,
+      "net_return_mean": -0.004358838524825027,
+      "success_lead_h_lower_median": 19.0,
+      "success_lead_h_upper_median": 20.0,
+      "success_at_least_6h_early": 1.0,
+      "prior_24h_return_median": 0.0,
+      "by_regime": {
+        "btc_down": {
+          "n": 25,
+          "precision": 0.08,
+          "net_return_mean": -0.024699675059513905
+        },
+        "btc_flat": {
+          "n": 28,
+          "precision": 0.17857142857142858,
+          "net_return_mean": 0.019515762276990135
+        },
+        "btc_up": {
+          "n": 29,
+          "precision": 0.10344827586206896,
+          "net_return_mean": -0.009874973320811324
+        }
+      },
+      "skipped_windows": []
+    },
+    "logistic_strength": {
+      "status": "evaluated",
+      "alerts": 16,
+      "resolved": 16,
+      "successes": 2,
+      "positive_candidate_rows": 52,
+      "candidate_row_recall": 0.038461538461538464,
+      "unknown_outcomes": 0,
+      "decision_days": 82,
+      "precision": 0.125,
+      "precision_lower": 0.125,
+      "precision_upper": 0.125,
+      "candidate_base_rate": 0.06961178045515395,
+      "net_return_mean": 0.035759646594472186,
+      "success_lead_h_lower_median": 42.0,
+      "success_lead_h_upper_median": 43.0,
+      "success_at_least_6h_early": 1.0,
+      "prior_24h_return_median": -0.013474507273622543,
+      "by_regime": {
+        "btc_down": {
+          "n": 11,
+          "precision": 0.18181818181818182,
+          "net_return_mean": 0.032885421023520316
+        },
+        "btc_flat": {
+          "n": 4,
+          "precision": 0.0,
+          "net_return_mean": 0.055072179622464246
+        },
+        "btc_up": {
+          "n": 1,
+          "precision": 0.0,
+          "net_return_mean": -0.009874004237025447
+        }
+      },
+      "skipped_windows": []
+    },
+    "tree_strength": {
+      "status": "evaluated",
+      "alerts": 28,
+      "resolved": 28,
+      "successes": 3,
+      "positive_candidate_rows": 52,
+      "candidate_row_recall": 0.057692307692307696,
+      "unknown_outcomes": 0,
+      "decision_days": 82,
+      "precision": 0.10714285714285714,
+      "precision_lower": 0.10714285714285714,
+      "precision_upper": 0.10714285714285714,
+      "candidate_base_rate": 0.06961178045515395,
+      "net_return_mean": -0.006590309284998521,
+      "success_lead_h_lower_median": 7.0,
+      "success_lead_h_upper_median": 8.0,
+      "success_at_least_6h_early": 1.0,
+      "prior_24h_return_median": -0.0053267932274621045,
+      "by_regime": {
+        "btc_down": {
+          "n": 12,
+          "precision": 0.16666666666666666,
+          "net_return_mean": 0.009132802576191321
+        },
+        "btc_flat": {
+          "n": 10,
+          "precision": 0.1,
+          "net_return_mean": -0.018197014701710767
+        },
+        "btc_up": {
+          "n": 6,
+          "precision": 0.0,
+          "net_return_mean": -0.018692023979524464
+        }
+      },
+      "skipped_windows": []
+    },
+    "tree_strength_spot": {
+      "status": "skipped",
+      "reasons": [
+        "spot/derivatives history covers less than 50% of training rows: {'spot_buy_share_24h': 0.0, 'spot_buy_accel_6h': 0.0, 'spot_buy_consistency_6h': 0.0, 'oi_change_24h': 0.0, 'funding': 0.0}",
+        "spot/derivatives history covers less than 50% of training rows: {'spot_buy_share_24h': 0.0, 'spot_buy_accel_6h': 0.0, 'spot_buy_consistency_6h': 0.0, 'oi_change_24h': 0.0, 'funding': 0.0}",
+        "spot/derivatives history covers less than 50% of training rows: {'spot_buy_share_24h': 0.0, 'spot_buy_accel_6h': 0.0, 'spot_buy_consistency_6h': 0.0, 'oi_change_24h': 0.0, 'funding': 0.0}",
+        "spot/derivatives history covers less than 50% of training rows: {'spot_buy_share_24h': 0.0, 'spot_buy_accel_6h': 0.0, 'spot_buy_consistency_6h': 0.0, 'oi_change_24h': 0.0, 'funding': 0.0}"
+      ]
+    }
+  },
+  "final_holdout": {
+    "momentum_baseline": {
+      "status": "evaluated",
+      "alerts": 63,
+      "resolved": 63,
+      "successes": 16,
+      "positive_candidate_rows": 109,
+      "candidate_row_recall": 0.14678899082568808,
+      "unknown_outcomes": 0,
+      "decision_days": 63,
+      "precision": 0.25396825396825395,
+      "precision_lower": 0.25396825396825395,
+      "precision_upper": 0.25396825396825395,
+      "candidate_base_rate": 0.19963369963369965,
+      "net_return_mean": 0.04053444483572689,
+      "success_lead_h_lower_median": 10.0,
+      "success_lead_h_upper_median": 11.0,
+      "success_at_least_6h_early": 0.6875,
+      "prior_24h_return_median": 0.0035521641889227035,
+      "by_regime": {
+        "btc_down": {
+          "n": 7,
+          "precision": 0.2857142857142857,
+          "net_return_mean": 0.0949527498681374
+        },
+        "btc_flat": {
+          "n": 37,
+          "precision": 0.2702702702702703,
+          "net_return_mean": 0.04987989718845615
+        },
+        "btc_up": {
+          "n": 19,
+          "precision": 0.21052631578947367,
+          "net_return_mean": 0.0022865568211028913
+        }
+      },
+      "skipped_windows": [],
+      "vs_momentum_baseline": {
+        "status": "exploratory; 4 registered arms, not adjusted for multiple comparisons",
+        "mean_daily_signal_return_difference": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ],
+        "block_calendar_days": 14,
+        "rough_independent_blocks": 6.214285714285714
+      }
+    },
+    "logistic_strength": {
+      "status": "evaluated",
+      "alerts": 12,
+      "resolved": 12,
+      "successes": 2,
+      "positive_candidate_rows": 109,
+      "candidate_row_recall": 0.01834862385321101,
+      "unknown_outcomes": 0,
+      "decision_days": 63,
+      "precision": 0.16666666666666666,
+      "precision_lower": 0.16666666666666666,
+      "precision_upper": 0.16666666666666666,
+      "candidate_base_rate": 0.19963369963369965,
+      "net_return_mean": 0.003902650048361813,
+      "success_lead_h_lower_median": 2.5,
+      "success_lead_h_upper_median": 3.5,
+      "success_at_least_6h_early": 0.0,
+      "prior_24h_return_median": -0.0478379955944742,
+      "by_regime": {
+        "btc_down": {
+          "n": 3,
+          "precision": 0.3333333333333333,
+          "net_return_mean": 0.1390186934406826
+        },
+        "btc_flat": {
+          "n": 2,
+          "precision": 0.5,
+          "net_return_mean": 0.04999999999999993
+        },
+        "btc_up": {
+          "n": 7,
+          "precision": 0.0,
+          "net_return_mean": -0.06717489710595799
+        }
+      },
+      "skipped_windows": [],
+      "vs_momentum_baseline": {
+        "status": "exploratory; 4 registered arms, not adjusted for multiple comparisons",
+        "mean_daily_signal_return_difference": -0.02881423246057992,
+        "ci95": [
+          -0.057253590308056344,
+          -0.004894636115211185
+        ],
+        "block_calendar_days": 14,
+        "rough_independent_blocks": 6.214285714285714
+      }
+    },
+    "tree_strength": {
+      "status": "evaluated",
+      "alerts": 23,
+      "resolved": 23,
+      "successes": 6,
+      "positive_candidate_rows": 109,
+      "candidate_row_recall": 0.05504587155963303,
+      "unknown_outcomes": 0,
+      "decision_days": 63,
+      "precision": 0.2608695652173913,
+      "precision_lower": 0.2608695652173913,
+      "precision_upper": 0.2608695652173913,
+      "candidate_base_rate": 0.19963369963369965,
+      "net_return_mean": 0.03612006424548635,
+      "success_lead_h_lower_median": 19.0,
+      "success_lead_h_upper_median": 20.0,
+      "success_at_least_6h_early": 0.6666666666666666,
+      "prior_24h_return_median": -0.013718070009460756,
+      "by_regime": {
+        "btc_down": {
+          "n": 3,
+          "precision": 0.3333333333333333,
+          "net_return_mean": 0.12335663031156134
+        },
+        "btc_flat": {
+          "n": 15,
+          "precision": 0.3333333333333333,
+          "net_return_mean": 0.047279048463139246
+        },
+        "btc_up": {
+          "n": 5,
+          "precision": 0.0,
+          "net_return_mean": -0.04969882804711734
+        }
+      },
+      "skipped_windows": [],
+      "vs_momentum_baseline": {
+        "status": "exploratory; 4 registered arms, not adjusted for multiple comparisons",
+        "mean_daily_signal_return_difference": -0.01980354651729435,
+        "ci95": [
+          -0.04607353297285922,
+          0.00951985991320767
+        ],
+        "block_calendar_days": 14,
+        "rough_independent_blocks": 6.214285714285714
+      }
+    },
+    "tree_strength_spot": {
+      "status": "skipped",
+      "reasons": [
+        "spot/derivatives history covers less than 50% of training rows: {'spot_buy_share_24h': 0.0, 'spot_buy_accel_6h': 0.0, 'spot_buy_consistency_6h': 0.0, 'oi_change_24h': 0.0, 'funding': 0.0}"
+      ]
+    }
+  },
+  "coverage": {
+    "rows": 2596,
+    "final_rows": 630,
+    "final_candidate_days": 63,
+    "spot_train_coverage": {
+      "spot_buy_share_24h": 0.0,
+      "spot_buy_accel_6h": 0.0,
+      "spot_buy_consistency_6h": 0.0,
+      "oi_change_24h": 0.0,
+      "funding": 0.0
+    },
+    "spot_final_coverage": {
+      "spot_buy_share_24h": 0.25396825396825395,
+      "spot_buy_accel_6h": 0.25396825396825395,
+      "spot_buy_consistency_6h": 0.2698412698412698,
+      "oi_change_24h": 0.25396825396825395,
+      "funding": 0.2968253968253968
+    }
+  },
+  "plan_sha256": "e679a3184240b06a34a6b957b70ed2375c7260d317a2cf1c85f1fba71b2e9913",
+  "plan": {
+    "version": 1,
+    "locked_on_utc": "2026-10-02",
+    "symbols": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "XRP",
+      "OP",
+      "ARB",
+      "AAVE",
+      "UNI",
+      "LINK",
+      "HYPE",
+      "PUMP"
+    ],
+    "history_start_utc": "2025-10-01",
+    "final_test_start_utc": "2026-07-01",
+    "development_fold_starts_utc": [
+      "2026-03-01",
+      "2026-04-01",
+      "2026-05-01",
+      "2026-06-01"
+    ],
+    "horizon_h": 168,
+    "take_profit": 0.2,
+    "stop_loss": 0.1,
+    "cost_per_side": 0.001,
+    "startup_return": 0.05,
+    "decision_stride_h": 24,
+    "decision_weekdays_utc": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "max_alerts_per_decision": 1,
+    "max_prior_24h_return": 0.05,
+    "embargo_h": 24,
+    "bootstrap_block_days": 14,
+    "bootstrap_repetitions": 1000,
+    "model_probability_floor": 0.15,
+    "arms": [
+      "momentum_baseline",
+      "logistic_strength",
+      "tree_strength",
+      "tree_strength_spot"
+    ],
+    "notes": [
+      "固定候选名单,不是全市场结果;当前存续币筛选存在幸存者偏差。",
+      "历史 OHLC 是事后下载的重建行情,不是当时已经归档的实盘预测。",
+      "现货主动买卖数据若训练区间覆盖不足,对应模型必须跳过,不得将缺失填零后声称增量。",
+      "最终检验各模型只报告预先登记结果,不据此重新调参;再改方法需要新的检验数据。",
+      "固定每个 UTC 工作日 00:00 一个决策,最多一条,周内不看未来排名。"
+    ]
+  },
+  "source_manifest": {
+    "asof_ts": 1790947897504,
+    "coins": [
+      {
+        "symbol": "AAVE",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "ARB",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "BTC",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "ETH",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "HYPE",
+        "errors": {},
+        "rows": {
+          "spot": 7967,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1762264800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "LINK",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "OP",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "PUMP",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "SOL",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "UNI",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      },
+      {
+        "symbol": "XRP",
+        "errors": {},
+        "rows": {
+          "spot": 8797,
+          "perp": 8797,
+          "spot_flow": 719,
+          "perp_flow": 71,
+          "oi": 720,
+          "funding": 100
+        },
+        "spot_start": 1759276800000,
+        "spot_end": 1790942400000,
+        "perp_start": 1759276800000,
+        "perp_end": 1790942400000
+      }
+    ],
+    "announcements": {
+      "observed_revisions": 129,
+      "matched_revisions": 5,
+      "historical_use": "excluded before first_seen_ts"
+    },
+    "unavailable": {
+      "buyback_execution": "No verified chain RPC/contracts configured; estimates are not executions",
+      "protocol_revenue": "Protocol data endpoints not in current environment allowlist",
+      "unlock": "No verified timed unlock source configured"
+    }
+  },
+  "limitations": [
+    "Fixed current survivor universe, not all-market performance",
+    "Historical reconstructed inputs, not original live forecasts",
+    "Cost proxy, no order book execution or capital curve",
+    "Small number of independent 14-day blocks in final holdout",
+    "Spot taker feed is coin-level flow, not exchange deposits/withdrawals",
+    "New economic/announcement sources are not validated yet"
+  ]
+}
