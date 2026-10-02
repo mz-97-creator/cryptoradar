@@ -155,7 +155,8 @@ def coin_features(cache_dir: Path) -> pd.DataFrame:
             g["fees_chg_30d"] = np.log((f30 + 1) / (f30.shift(30) + 1))
         g = g.reindex(columns=FEATURES)
         g["coin"] = coin
-        g["avail_ts"] = (g.index.astype("int64") // 1_000_000) + 2 * DAY      # 数据日 + 2 天 之后才算"已知"
+        # 数据日 + 2 天 之后才算"已知";和 pandas 的时间精度无关地换成毫秒
+        g["avail_ts"] = (g.index - pd.Timestamp(0)) // pd.Timedelta(milliseconds=1) + 2 * DAY
         rows.append(g.reset_index(drop=True))
     return pd.concat(rows) if rows else pd.DataFrame(columns=["coin", "avail_ts"] + FEATURES)
 

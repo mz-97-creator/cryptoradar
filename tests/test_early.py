@@ -102,3 +102,21 @@ class CloudTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class FundamentalsTests(unittest.TestCase):
+    def test_daily_features_and_two_day_lag(self):
+        from cryptoradar import fundamentals as fd
+        day0 = int(pd.Timestamp("2025-03-01").timestamp())
+        hrev = {str(day0 + k * 86400): (200_000.0 if k >= 35 else 100_000.0) for k in range(43)}
+        d = fd.daily_features({"hrev": hrev, "fees": hrev, "rev": hrev})
+        last = d.iloc[-1]                                      # 最后一天(未收完)已丢掉:第 41 天
+        self.assertEqual(d.index[-1], pd.Timestamp("2025-03-01") + pd.Timedelta(days=41))
+        self.assertAlmostEqual(last["f_hrev_7d"], 7 * 200_000)
+        self.assertAlmostEqual(last["f_hrev_ratio"], 2.0)
+        t = int(pd.Timestamp("2025-04-05").timestamp() * 1000)     # 第 35 天 00:00 起只能看到第 33 天的数据
+        f = pd.DataFrame({"close": 1.0}, index=np.arange(t, t + 3 * 86_400_000, HOUR))
+        a = fd.attach_history(f, d)
+        self.assertAlmostEqual(a["f_hrev_7d"].iloc[0], d.loc["2025-04-03", "f_hrev_7d"])
+        self.assertAlmostEqual(a["f_hrev_7d"].iloc[-1], d.loc["2025-04-05", "f_hrev_7d"])
+        self.assertLess(a["f_hrev_7d"].iloc[0], 7 * 200_000, "不能用到还没公布的数据")

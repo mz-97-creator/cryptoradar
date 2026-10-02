@@ -190,7 +190,8 @@ def attach_history(f: pd.DataFrame, daily: pd.DataFrame, lag_days: int = 2) -> p
     f = f.copy()
     if daily.empty:
         return f
-    avail = (daily.index.astype("int64") // 1_000_000) + lag_days * DAY_S * 1000
+    # 和 pandas 的时间精度无关地换成毫秒(pandas 3 里 to_datetime(unit="s") 是秒精度,直接 astype 会差 1000 倍)
+    avail = (daily.index - pd.Timestamp(0)) // pd.Timedelta(milliseconds=1) + lag_days * DAY_S * 1000
     d = daily.set_axis(avail).sort_index()
     left = pd.DataFrame({"ts": f.index.to_numpy()})
     m = pd.merge_asof(left, d.reset_index(names="ts"), on="ts", direction="backward")
