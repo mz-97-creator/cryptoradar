@@ -1,5 +1,9 @@
 # CryptoRadar
 
+> **当前分支是 Codex 独立研究版。** 使用方式、隔离边界及验证限制见
+> [CODEX_VERSION.md](CODEX_VERSION.md)。下面的原版说明保留用于理解基线；
+> 本分支工作流只手动运行，不更新原版 data 分支，不推送交易建议。
+
 ## 云端版(当前在用)
 
 - **扫描**:`cloud_run.py` 在 GitHub Actions 上运行,用 OKX 公开数据扫描市值前 150 名中有 OKX USDT 永续的代币,外加自选(OP、HYPE、ETH、AAVE、ARB、PUMP、SOL、XRP、FIL、STX)。

@@ -6,3 +6,7 @@ reports/
 out/
 prev/
 .venv/
+codex-data/
+codex-prev/
+codex-out/
+codex-reports/

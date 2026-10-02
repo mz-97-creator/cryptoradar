@@ -250,7 +250,7 @@ STATES = {
              "全市场持仓明显下降、费率回落,多头杠杆刚被清洗。历史上常是短线反弹窗口,但不保证见底。",
              "持仓重新增加而价格不涨,说明有人在抄底失败"),
     "GREEN": ("🟢", "正常",
-              "杠杆和广度都在正常区间,没有系统性风险信号。",
+              "本工具的费率、持仓和广度规则未触发风险条件;这不代表市场没有其他风险。",
               "费率升到近 30 天 80% 分位以上且持仓增加"),
 }
 
@@ -383,6 +383,7 @@ def new_prediction(now: int, kind: str, symbol: str, cid: str, t_bar: int, price
                    n: int, scope: str = "", rules: list[str] | None = None, score: float | None = None,
                    watch: bool = False) -> dict:
     return {"id": f"{now}-{kind}-{symbol}-{cid}", "ts": now, "t_bar": int(t_bar), "kind": kind,
+            "settlement": "observed_quote_v2" if kind == "signal" and price is not None else "legacy_bar_close",
             "symbol": symbol, "cond": cid, "price": price, "scope": scope, "call": call,
             "pred_up72": pred_up72, "base_up72": base_up72, "pred_med72": pred_med72, "n": int(n),
             "rules": rules or [cid], "score": score, "watch": bool(watch), "res": {}}
@@ -402,6 +403,38 @@ def resolve(preds: list[dict], combined: dict[str, pd.DataFrame], m: pd.DataFram
     for p in preds:
         for h in (24, 72):
             key = f"{h}h"
+            if p.get("settlement") == "observed_quote_v2":
+                if key in p["res"]:
+                    continue
+                # Hourly timestamps name the OPEN. Use the first fully closed bar
+                # ending at/after the observation's horizon, never a live close.
+                entry_ts = int(p["ts"])
+                end_ts = ((entry_ts + h * HOUR + HOUR - 1) // HOUR) * HOUR
+                t1 = end_ts - HOUR
+                f = combined.get(p["symbol"])
+                if now < end_ts or f is None or t1 not in f.index:
+                    continue
+                c0, c1 = p.get("price"), f.at[t1, "close"]
+                if c0 is None or not np.isfinite(c0) or c0 <= 0 or pd.isna(c1):
+                    continue
+                # The entry-hour low includes trades BEFORE the alert. Exclude
+                # that bar and explicitly mark the unobserved partial-hour risk.
+                start = ((entry_ts + HOUR - 1) // HOUR) * HOUR
+                lows = f["_low"].loc[start:t1]
+                expected = max(0, (t1 - start) // HOUR + 1)
+                complete = len(lows) == expected and lows.notna().all()
+                b0 = p.get("reference_btc_price")
+                b1 = btc.at[t1, "close"] if btc is not None and t1 in btc.index else None
+                bret = float(b1 / b0 - 1) if b0 and b1 is not None and pd.notna(b1) else None
+                p["res"][key] = {
+                    "ret": float(c1 / c0 - 1), "btc": bret,
+                    "mae": float(lows.min() / c0 - 1) if complete and len(lows) else None,
+                    "entry_price": float(c0), "exit_price": float(c1), "exit_ts": end_ts,
+                    "actual_h": (end_ts - entry_ts) / HOUR,
+                    "mae_complete": bool(complete and start == entry_ts),
+                    "settlement": "observed_quote_v2",
+                }
+                continue
             if key in p["res"] or now < p["t_bar"] + (h + 1) * HOUR:
                 continue
             t0, t1 = p["t_bar"], p["t_bar"] + h * HOUR
@@ -441,7 +474,8 @@ def scorecard(preds: list[dict], now: int, days: int = 30) -> dict:
         if not items:
             return None
         rets = np.array([p["res"]["72h"]["ret"] for p in items])
-        maes = np.array([p["res"]["72h"]["mae"] for p in items if p["res"]["72h"].get("mae") is not None])
+        maes = np.array([p["res"]["72h"]["mae"] for p in items
+                         if p["res"]["72h"].get("mae") is not None and p["res"]["72h"].get("mae_complete", True)])
         calls = [p for p in items if p["call"] in ("up", "down")]
         hits = [(p["res"]["72h"]["ret"] > 0) == (p["call"] == "up") for p in calls]
         preds_up = [p["pred_up72"] for p in items if p.get("pred_up72") is not None]
@@ -459,6 +493,8 @@ def scorecard(preds: list[dict], now: int, days: int = 30) -> dict:
             "down": summarize([p for p in items if p["call"] == "down"]),
             "by_cond": {c: summarize([p for p in items if p["cond"] == c])
                         for c in sorted({p["cond"] for p in items})},
+            "by_settlement": {method: summarize([p for p in items if p.get("settlement", "legacy_bar_close") == method])
+                              for method in sorted({p.get("settlement", "legacy_bar_close") for p in items})},
         }
     return out
 
@@ -479,7 +515,10 @@ def scorecard_text(sc: dict) -> str:
     mk = sc["groups"].get("market", {}).get("all")
     if mk:
         parts.append(f"市场灯切换 {mk['n']} 次,之后山寨 72h 中位 {_p(mk['ret72_med'], 1)}")
-    parts.append(f"待核对 {sc['pending']} 条")
+    for method, stat in g.get("by_settlement", {}).items():
+        name = "保存报价核对" if method == "observed_quote_v2" else "旧小时收盘口径"
+        parts.append(f"{name}:到期 {stat['n']} 条,72h 中位 {_p(stat['ret72_med'], 1)}")
+    parts.append(f"待核对 {sc['pending']} 条;新旧核对口径不同,请分别查看")
     return ";".join(parts)
 
 
@@ -487,8 +526,8 @@ def scorecard_text(sc: dict) -> str:
 # predictions.json 只保留 PRED_KEEP_DAYS 天、且只记主条件;这张表每条推送的信号一行,
 # 含触发的全部规则、得分、24h/72h 的真实收益(原始/相对 BTC)和持有期最大回撤,永不删除,
 # 实盘样本越攒越多,按规则汇总后可以和回测(research.py / tune.py)对照。
-LEDGER_COLS = ["id", "ts", "symbol", "watch", "rules", "score", "price", "call", "pred_up72", "base_up72",
-               "ret24", "resid24", "mae24", "ret72", "resid72", "mae72"]
+LEDGER_COLS = ["id", "ts", "symbol", "watch", "rules", "score", "price", "call", "pred_up72", "base_up72", "settlement",
+               "ret24", "resid24", "mae24", "ret72", "resid72", "mae72", "mae_complete24", "mae_complete72"]
 
 
 def load_ledger(path: Path) -> pd.DataFrame | None:
@@ -509,13 +548,15 @@ def update_ledger(ledger: pd.DataFrame | None, preds: list[dict]) -> pd.DataFram
         r.update({"id": p["id"], "ts": p["ts"], "symbol": p["symbol"], "watch": int(bool(p.get("watch"))),
                   "rules": ";".join(p.get("rules") or [p["cond"]]), "score": p.get("score"),
                   "price": p.get("price"), "call": p.get("call"),
-                  "pred_up72": p.get("pred_up72"), "base_up72": p.get("base_up72")})
+                  "pred_up72": p.get("pred_up72"), "base_up72": p.get("base_up72"),
+                  "settlement": p.get("settlement", "legacy_bar_close")})
         for h in (24, 72):
             res = p["res"].get(f"{h}h")
             if res:
                 r[f"ret{h}"] = res["ret"]
                 r[f"resid{h}"] = None if res.get("btc") is None else res["ret"] - res["btc"]
                 r[f"mae{h}"] = res.get("mae")
+                r[f"mae_complete{h}"] = res.get("mae_complete", True)
         rows[p["id"]] = r
     df = pd.DataFrame(list(rows.values()), columns=LEDGER_COLS)
     return df.sort_values("ts").reset_index(drop=True)
@@ -525,7 +566,8 @@ def _row_stats(sub: pd.DataFrame) -> dict | None:
     x = sub["resid72"].dropna()
     if x.empty:
         return None
-    mae = sub["mae72"].dropna()
+    complete = sub["mae_complete72"].fillna(True).astype(bool) if "mae_complete72" in sub else pd.Series(True, index=sub.index)
+    mae = sub.loc[complete, "mae72"].dropna()
     p10 = float(mae.quantile(0.10)) if len(mae) else None
     sd = x.std()
     return {"n": int(len(x)), "resid72_mean": float(x.mean()), "resid72_median": float(x.median()),
