@@ -1,0 +1,17 @@
+# Independent Codex research configuration. No push credentials or execution.
+universe:
+  top_n: 150
+  watchlist: [OP, HYPE, ETH, AAVE, ARB, PUMP, SOL, XRP, FIL, STX]
+signals:
+  cooldown_hours: 6
+  min_score_to_push: 2.5
+  watchlist_min_score: 1.0
+quality:
+  max_bar_age_h: 2
+  min_market_coverage: 0.8
+notify:
+  channel: console
+  heartbeat_hour: null
+storage:
+  db_path: codex-data/cryptoradar.db
+display_timezone: Asia/Shanghai

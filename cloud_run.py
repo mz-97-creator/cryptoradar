@@ -35,6 +35,7 @@ from cryptoradar.config import load_config
 from cryptoradar.features import build_features
 from cryptoradar.okx_api import HOUR_MS, OKX, OKXBlockedError
 from cryptoradar.okx_collect import collect
+from cryptoradar.quality import append_research, frame_quality
 from cryptoradar.signals import apply_weights, describe, evaluate_last, merged_thresholds
 from cryptoradar.universe import DEFAULT_EXCLUDE, _looks_like_stable, fetch_coingecko_top
 
@@ -167,7 +168,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
 
     uni, uni_cache = build_universe(okx, cfg, prev_state.get("universe"))
     order = sorted(uni, key=lambda u: (u["ccy"] not in ("BTC", "ETH"),))  # 先取 BTC/ETH
-    data, failed = {}, []
+    data, failed, quality = {}, [], {}
     for i, u in enumerate(order, 1):
         try:
             data[u["ccy"]] = collect(okx, u["ccy"], u["inst"])
@@ -182,6 +183,10 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     if "BTC" not in data or data["BTC"][0].empty:
         raise RuntimeError("BTC 数据获取失败,无法计算残差收益")
     btc, eth = data["BTC"][0], data.get("ETH", (pd.DataFrame(),))[0]
+    now = now_ms()
+    max_age = float(cfg.get("quality", {}).get("max_bar_age_h", 2))
+    if not frame_quality(btc, now, max_age)["usable"]:
+        raise RuntimeError("BTC 数据陈旧或无效,本轮停止生成预警")
 
     rules = apply_weights(sc.get("rule_weights"))
     results, frames = [], {}
@@ -189,10 +194,15 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         if u["ccy"] not in data:
             continue
         df, fund, live = data[u["ccy"]]
+        quality[u["ccy"]] = frame_quality(df, now, max_age)
+        if not quality[u["ccy"]]["usable"]:
+            failed.append(u["ccy"])
+            continue
         if len(df) < 200:
             continue
         try:
             f = build_features(df, btc, fund, live.get("funding_interval_h") or 8.0, eth, live)
+            f["open"], f["high"], f["low"] = df["open"], df["high"], df["low"]
         except Exception as e:
             failed.append(u["ccy"])
             log.warning("%s 特征计算失败:%s", u["ccy"], e)
@@ -208,6 +218,10 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
     mframe = fs.market_frame(combined)
     mrates = fs.market_rates(mframe) if not mframe.empty else {}
     mstate = fs.market_summary(mframe, mrates)
+    coverage = len(results) / len(uni) if uni else 0
+    coverage_ok = coverage >= float(cfg.get("quality", {}).get("min_market_coverage", 0.8))
+    if not coverage_ok:
+        mstate = {}  # A partial universe must not generate a reassuring light.
     preds = list(prev_preds or [])
 
     def outlook(sym: str, fired) -> tuple[str, str | None, dict | None, str]:
@@ -247,6 +261,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
                 (st or {}).get("up72"), (rates.get("baseline") or {}).get("up72"),
                 (st or {}).get("med72"), (st or {}).get("n", 0), scope,
                 rules=[r.id for r in fired], score=score, watch=u["watch"]))
+            preds[-1]["reference_btc_price"] = _num(btc["close"].iloc[-1])
             for r in fired:
                 last_fire[f"{u['ccy']}|{r.id}"] = now
 
@@ -343,6 +358,7 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         opp_block = {"error": f"{type(e).__name__}: {e}"}
     if extras is not None:
         extras["opp_log"] = opp_log
+        extras["research_frames"] = frames
     archive = fs.archive_table(combined, now)
 
     btc_row = next((row for u, row, _ in results if u["ccy"] == "BTC"), None)
@@ -358,6 +374,8 @@ def run(cfg: dict, okx: OKX, prev_state: dict, prev_events: list, tz,
         "generated_at": now,
         "generated_at_local": local.strftime("%Y-%m-%d %H:%M %Z"),
         "runtime_sec": round(time.time() - t0, 1),
+        "quality": {"coverage": coverage, "market_usable": coverage_ok, "coins": quality,
+                    "note": "报价是扫描时观测值,不是实际成交价;未收盘小时线仅供异动监测"},
         "scanned": len(results), "universe": len(uni), "universe_source": uni_cache["source"], "failed": failed,
         "market": market,
         "market_state": mstate,
@@ -397,7 +415,7 @@ def opportunity_md(o: dict, live: dict | None) -> list[str]:
     age = lambda c: "" if c.get("age_days") is None else (f"{c['age_days']}天" + ("⚠️" if c.get("status") == "上市较短" else ""))
     row = lambda c: (f"| {c['symbol']} | {age(c)} | {c['vol_range'] * 100:.0f}% | {c['mae_q10'] * 100:+.0f}% | {c['safe_lev']:.1f}x | "
                      f"{c['p_up'] * 100:.0f}% | {c['p_dn'] * 100:.0f}% | 波动#{c['rank_vol_range']} |")
-    head = ["| 币 | 上市 | 预测波动 | 回撤 q10 | 杠杆上限 | P上 | P下 | 排名 |", "|---|---|---|---|---|---|---|---|"]
+    head = ["| 币 | 上市 | 预测波动 | 回撤 q10 | 回撤倒数(非杠杆建议) | P上 | P下 | 排名 |", "|---|---|---|---|---|---|---|---|"]
     lines = []
     if o.get("watch_highlights"):
         lines += ["**自选里值得留意的**:" + ";".join(f"{h['symbol']}({'、'.join(h['reasons'])})" for h in o["watch_highlights"]), ""]
@@ -418,6 +436,12 @@ def opportunity_md(o: dict, live: dict | None) -> list[str]:
 def status_md(sig: dict, events: list) -> str:
     m = sig.get("market", {})
     lines = [f"# CryptoRadar 状态 · {sig.get('generated_at_local', '')}", ""]
+    quality = sig.get("quality", {})
+    if quality:
+        lines += [f"数据覆盖率 {quality['coverage']:.0%} · "
+                  + ("市场状态可评估" if quality["market_usable"] else "数据不全,暂停市场灯判断"), ""]
+    lines += ["> Codex 研究版:新预警按扫描时保存报价核对;小时线结算可延后不足 1 小时。"
+              "入场小时的剩余时间风险无法完整核对,不是成交回测;旧记录保留旧口径。", ""]
     if sig.get("error"):
         lines += [f"**运行出错:** {sig['error']}", ""]
     if m:
@@ -496,6 +520,10 @@ def main() -> None:
     prev_preds = fs.load_predictions(prev / "predictions.json")
     prev_ledger = fs.load_ledger(prev / "ledger.csv")
     try:
+        prev_research = pd.read_csv(prev / "research_features.csv.gz")
+    except FileNotFoundError:
+        prev_research = None
+    try:
         prev_opp_log = pd.read_csv(prev / "opp_log.csv.gz")
     except Exception:
         prev_opp_log = None
@@ -532,6 +560,9 @@ def main() -> None:
     opp_log = extras.get("opp_log", prev_opp_log)
     if opp_log is not None and len(opp_log):
         opp_log.to_csv(out / "opp_log.csv.gz", index=False)
+    research = append_research(prev_research, extras.get("research_frames", {}), now_ms())
+    if len(research):
+        research.to_csv(out / "research_features.csv.gz", index=False)
     # 出错也以 0 退出:错误写进 signals.json 由 Claude 转告,避免 GitHub 每 15 分钟发一封失败邮件
     log.info("完成:新事件 %s 个%s", signals.get("new_events"), "(本轮出错)" if code else "")
 

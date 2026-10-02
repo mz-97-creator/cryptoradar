@@ -190,6 +190,7 @@ def main():
     # 信号后验记录表:含全部触发规则,幂等更新,预测被清理后记录仍在
     pr2 = fs.new_prediction(t0, "signal", "OP", "OI_DIV", t0, 0.5, "up", 0.6, 0.5, 0.01, 30,
                             rules=["OI_DIV", "RESID"], score=3.0, watch=True)
+    pr2["reference_btc_price"] = float(f.at[t0, "close"])
     pr2 = fs.resolve([pr2], {"OP": f, "BTC": f}, pd.DataFrame(), t0 + 100 * HOUR_MS)[0]
     led = fs.update_ledger(None, [pr2])
     check(len(led) == 1 and led.at[0, "rules"] == "OI_DIV;RESID" and pd.notna(led.at[0, "resid72"]), "记录表写入全部规则和 72h 结果")

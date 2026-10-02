@@ -1,69 +1,59 @@
-name: CryptoRadar
+name: CryptoRadar Codex research
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"     # 每 15 分钟(GitHub 高峰期可能延迟几分钟)
-  workflow_dispatch:            # 可在 Actions 页面手动运行
-  push:
-    # tick 分支:Claude 定时任务推送前先推一次 tick.txt 触发新扫描(GitHub 自带的定时触发经常延迟几个小时)
-    branches: [main, tick]
-    paths:
-      - "tick.txt"
-      - "cloud_run.py"
-      - "cloud_config.yaml"
-      - "cryptoradar/**"
-      - "models/**"
-      - ".github/workflows/radar.yml"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 concurrency:
-  group: cryptoradar
+  group: cryptoradar-codex-research
   cancel-in-progress: false
 
 jobs:
-  scan:
+  research:
+    if: github.ref == 'refs/heads/codex/research-v1'
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main   # 不管由哪个分支触发,都运行 main 上的代码
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
           cache: pip
-
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 安装机会模型依赖(失败不影响扫描,只是跳过机会榜)
-        run: pip install scikit-learn==1.9.1 || echo "scikit-learn 安装失败,机会模型将被跳过"
-
-      - name: 取回上一次的状态
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-research.txt
+      - name: Test research labels and alert settlement
+        run: python -m unittest tests.test_research_integrity tests.test_leading
+      - name: Restore the last successful Codex snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p prev
-          if git fetch --depth=1 origin data 2>/dev/null; then
-            for f in state.json events.json signals.json archive.csv.gz predictions.json ledger.csv opp_log.csv.gz; do
-              git show FETCH_HEAD:$f > prev/$f 2>/dev/null || rm -f prev/$f
-            done
+          previous_run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow radar.yml --branch codex/research-v1 --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$previous_run" ]; then
+            gh run download "$previous_run" --repo "$GITHUB_REPOSITORY" --name codex-research-snapshot --dir prev
           fi
-
-      - name: 扫描
-        run: python cloud_run.py --config cloud_config.yaml --prev prev --out out
-
-      - name: 发布到 data 分支
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan into isolated research files
+        run: python cloud_run.py --config codex_config.yaml --prev prev --out out
+      - name: Collect leading sources and run locked time study
         run: |
-          [ -f out/signals.json ] || exit 0
-          cd out
-          git init -q -b data
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -qm "scan $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push -qf "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          python leading_collect.py --plan leading_plan.json --out prev/leading_data --workers 3
+          python leading_study.py --plan leading_plan.json --data prev/leading_data --out out/leading_research
+          cp -r prev/leading_data out/leading_data
+      - name: Reject stale or failed snapshots
+        run: |
+          python - <<'PYCODE'
+          import json
+          from pathlib import Path
+          s = json.loads(Path('out/signals.json').read_text())
+          if s.get('error') or not s.get('quality', {}).get('market_usable'):
+              raise SystemExit('Scan failed or universe coverage is insufficient; preserving previous successful snapshot')
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codex-research-snapshot
+          path: out/
+          retention-days: 90
