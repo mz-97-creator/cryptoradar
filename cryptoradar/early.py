@@ -45,6 +45,7 @@ DEFAULTS = {
     "lev_share_max": 0.0,     # S_SPOT_LED:合约/现货成交量 z 不高于它(现货占比高于平时)
     "f_ratio": 1.3,           # F_*:最近 7 日 / 之前 28 日周均值
     "f_min_usd_7d": 50_000,   # F_REV_UP / F_FEES_UP:最近 7 日至少这么多美元,太小的不看
+    "f_min_base_7d": 25_000,  # F_*:之前 4 周的周均也至少这么多(数据质量:基数太小时一次突变就是几十倍,如 XRP 2026-09)
     "f_tvl_7d": 0.10,         # F_TVL_UP:TVL 7 日对数变化
     # 以下 4 条(I_* / S_ACCUM / S_LEV_CHASE)的阈值在看任何结果之前拍定,之后不再按结果调整:
     "res_rank": 0.80,         # I_RESILIENT:大盘跌时超额的全市场排名(前 20%)
@@ -94,9 +95,14 @@ def _rev_up(f: pd.DataFrame, t: dict) -> pd.Series:
     """持币人收入(回购/分红)加速;没有持币人收入数据的协议看协议收入。"""
     h7, r7 = _c(f, "f_hrev_7d"), _c(f, "f_rev_7d")
     has_h = h7 >= t["f_min_usd_7d"]
-    up_h = has_h & (_c(f, "f_hrev_ratio") >= t["f_ratio"])
-    up_r = ~has_h & (r7 >= t["f_min_usd_7d"]) & (_c(f, "f_rev_ratio") >= t["f_ratio"])
+    up_h = has_h & (_c(f, "f_hrev_ratio") >= t["f_ratio"]) & _base_ok(h7, _c(f, "f_hrev_ratio"), t)
+    up_r = ~has_h & (r7 >= t["f_min_usd_7d"]) & (_c(f, "f_rev_ratio") >= t["f_ratio"]) & _base_ok(r7, _c(f, "f_rev_ratio"), t)
     return up_h | up_r
+
+
+def _base_ok(s7: pd.Series, ratio: pd.Series, t: dict) -> pd.Series:
+    """之前 4 周的周均 = 最近 7 日 / 加速倍数;基数太小的不算加速。"""
+    return (s7 / ratio.where(ratio > 0)) >= t["f_min_base_7d"]
 
 
 DETECTORS += [
@@ -106,7 +112,8 @@ DETECTORS += [
              & (_c(f, "resid_24h_z") > -1)),
     Detector("F_REV_UP", "回购/协议收入加速", _rev_up),
     Detector("F_FEES_UP", "协议费用(使用量)加速",
-             lambda f, t: (_c(f, "f_fees_7d") >= t["f_min_usd_7d"]) & (_c(f, "f_fees_ratio") >= t["f_ratio"])),
+             lambda f, t: (_c(f, "f_fees_7d") >= t["f_min_usd_7d"]) & (_c(f, "f_fees_ratio") >= t["f_ratio"])
+             & _base_ok(_c(f, "f_fees_7d"), _c(f, "f_fees_ratio"), t)),
     Detector("F_TVL_UP", "TVL 明显增长", lambda f, t: _c(f, "f_tvl_chg_7d") >= t["f_tvl_7d"]),
 ]
 DETECTORS += [
@@ -300,7 +307,7 @@ def text(firing: list[dict], summ: dict, min_n: int = 30) -> list[str]:
                               + (f",t={s['t']:+.1f}" if s.get("t") is not None else "") + ")"
                               + ("(样本少)" if s["n"] < min_n else ""))
             lines.append(f"| {d.name}({d.id}) | {st['total']} | {cell(st['72h'])} | {cell(st['168h'])} | {cell(st['336h'])} |")
-    lines.append("> 实验功能,默认不推送。超额 = 相对同一时刻全部币平均的超额;t 按天聚合并做 Newey-West 校正。"
-                 "历史检验(币安 2025-03~2026-10,见 studies/early_study.md):四类都能比现有推送更早响,"
-                 "但触发后平均没有显著超额,需要靠这里的实盘结果继续判断。明细见 data 分支 early_log.csv.gz")
+    lines.append("> 实验功能:只有自选币的回购/收入加速(F_REV_UP)会推送,其余只记录、到期核对。"
+                 "超额 = 相对同一时刻全部币平均的超额;t 按天聚合并做 Newey-West 校正。"
+                 "历史检验见 studies/early_study.md;明细见 data 分支 early_log.csv.gz")
     return lines

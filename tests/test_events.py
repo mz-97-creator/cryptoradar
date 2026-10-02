@@ -79,3 +79,14 @@ class WindowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RecentTextTests(unittest.TestCase):
+    def test_uses_official_time_and_dedupes(self):
+        now = 100 * DAY
+        rows = [{"id": "a", "kind": "spot_list", "source": "okx_ann", "symbol": "OLD", "event_ts": now - 60 * DAY, "title": "old"},
+                {"id": "b", "kind": "spot_list", "source": "okx_ann", "symbol": "NEW", "event_ts": now - HOUR, "title": "NEW/USD"},
+                {"id": "c", "kind": "spot_list", "source": "okx_ann", "symbol": "NEW", "event_ts": now - HOUR, "title": "NEW/USDT"}]
+        lines = ev.recent_text(ev.merge(None, rows, now), now, 48)
+        self.assertEqual(len(lines), 1, "旧公告不算近期事件,同一天两个交易对只列一条")
+        self.assertIn("NEW", lines[0])

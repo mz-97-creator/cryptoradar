@@ -221,7 +221,10 @@ def refresh(prev: pd.DataFrame | None, state: dict | None, now: int, budget_s: f
 def recent_text(ev: pd.DataFrame | None, now: int, hours: int = 48, watch: set | None = None) -> list[str]:
     if ev is None or ev.empty:
         return ["暂无事件"]
-    e = ev[(ev["kind"] != "buyback_day") & (pd.to_numeric(ev["seen_at"], errors="coerce") >= now - hours * 3_600_000)]
+    # 按官方时间筛选(第一次运行时公告列表里的旧公告也是"首次看到",不能当成新事件);
+    # 同一币、同一类、同一来源、同一天的多条(如 USD 和 USDT 两个交易对)只列一条
+    e = ev[(ev["kind"] != "buyback_day") & (pd.to_numeric(ev["event_ts"], errors="coerce") >= now - hours * 3_600_000)]
+    e = e.assign(_d=e["event_ts"] // DAY).drop_duplicates(["symbol", "kind", "source", "_d"])
     lines = []
     for r in e.sort_values("event_ts", ascending=False).head(30).itertuples():
         star = "⭐" if watch and r.symbol in watch else ""

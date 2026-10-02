@@ -120,3 +120,12 @@ class FundamentalsTests(unittest.TestCase):
         self.assertAlmostEqual(a["f_hrev_7d"].iloc[0], d.loc["2025-04-03", "f_hrev_7d"])
         self.assertAlmostEqual(a["f_hrev_7d"].iloc[-1], d.loc["2025-04-05", "f_hrev_7d"])
         self.assertLess(a["f_hrev_7d"].iloc[0], 7 * 200_000, "不能用到还没公布的数据")
+
+
+class RevenueGuardTests(unittest.TestCase):
+    def test_tiny_base_spike_is_not_acceleration(self):
+        f = frame(n=2)
+        f.loc[f.index[-1], ["f_hrev_7d", "f_hrev_ratio", "f_rev_7d", "f_rev_ratio"]] = [np.nan, np.nan, 250_000, 32.8]
+        self.assertNotIn("F_REV_UP", [d.id for d in early.evaluate_last(f, TH)], "XRP 式:基数约 7.6k/周,一次突变 32 倍")
+        f.loc[f.index[-1], ["f_rev_7d", "f_rev_ratio"]] = [250_000, 1.5]
+        self.assertIn("F_REV_UP", [d.id for d in early.evaluate_last(f, TH)], "基数 16.7 万/周,1.5 倍")
